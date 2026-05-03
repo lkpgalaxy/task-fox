@@ -1,6 +1,5 @@
-import { Head, Link, useForm, usePage } from '@inertiajs/react';
+import { Head, Link, usePage } from '@inertiajs/react';
 import { useState } from 'react';
-import type { FormEvent } from 'react';
 import { AppShell } from '@/components/app-shell';
 import {
     Alert,
@@ -13,11 +12,7 @@ import {
     Td,
     Th,
 } from '@/components/ui';
-import { UploadSourceModal } from '@/components/upload-source-modal';
-import type {
-    UploadSourceFormData,
-    UploadSourceType,
-} from '@/components/upload-source-modal';
+import { UploadSourceAction } from '@/components/upload-source-modal';
 import inputSources from '@/routes/input-sources';
 
 type SourceRecord = {
@@ -101,64 +96,16 @@ const safeJson = (value: unknown): string | null => {
 
 export default function InputSourcesIndex() {
     const { sources, flash } = usePage<PageProps>().props;
-    const [showUploadModal, setShowUploadModal] = useState(false);
     const [selectedAnalysisResult, setSelectedAnalysisResult] = useState<{
         title: string;
         json: string;
     } | null>(null);
 
-    const form = useForm<UploadSourceFormData>({
-        title: '',
-        source_type: 'file',
-        text: '',
-        upload: null,
-        redirect_to: 'input-sources.index',
-    });
-
-    const closeUploadModal = () => {
-        setShowUploadModal(false);
-        form.clearErrors();
-    };
-
-    const updateSourceType = (sourceType: UploadSourceType) => {
-        form.setData({
-            ...form.data,
-            source_type: sourceType,
-            text: sourceType === 'text' ? form.data.text : '',
-            upload: sourceType === 'file' ? form.data.upload : null,
-        });
-        form.clearErrors('text', 'upload');
-    };
-
-    const submitUpload = (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        form.transform((data) => ({
-            ...data,
-            text: data.source_type === 'text' ? data.text : '',
-            upload: data.source_type === 'file' ? data.upload : null,
-        }));
-        form.post(inputSources.store.url(), {
-            forceFormData: true,
-            onSuccess: () => {
-                setShowUploadModal(false);
-                form.reset();
-            },
-        });
-    };
-
     return (
         <AppShell
             title="Input sources"
             description="Uploaded files and pasted text queued for task analysis."
-            actions={
-                <Button
-                    type="button"
-                    variant="primary"
-                    onClick={() => setShowUploadModal(true)}
-                >
-                    Upload source
-                </Button>
-            }
+            actions={<UploadSourceAction redirectTo="input-sources.index" />}
         >
             <Head title="Input sources" />
 
@@ -303,16 +250,6 @@ export default function InputSourcesIndex() {
                     </div>
                 </nav>
             </div>
-
-            <UploadSourceModal
-                show={showUploadModal}
-                title="Upload source"
-                form={form}
-                sourceTypes={['file', 'text']}
-                onClose={closeUploadModal}
-                onSubmit={submitUpload}
-                onSourceTypeChange={updateSourceType}
-            />
 
             <Modal
                 show={selectedAnalysisResult !== null}

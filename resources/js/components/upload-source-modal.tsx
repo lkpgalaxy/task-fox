@@ -1,6 +1,9 @@
+import { useForm } from '@inertiajs/react';
 import type { InertiaFormProps } from '@inertiajs/react';
+import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { cn } from '@/lib/utils';
+import inputSources from '@/routes/input-sources';
 import { Button, Field, Input, Modal, Textarea } from './ui';
 
 export type UploadSourceType = 'text' | 'file';
@@ -26,6 +29,10 @@ type UploadSourceModalProps = {
     onSourceTypeChange: (sourceType: UploadSourceType) => void;
 };
 
+type UploadSourceActionProps = {
+    redirectTo?: 'input-sources.index' | 'tasks.index';
+};
+
 const formatError = (error: string | string[] | undefined): string | null => {
     if (Array.isArray(error)) {
         return error.join(', ');
@@ -34,11 +41,75 @@ const formatError = (error: string | string[] | undefined): string | null => {
     return error ?? null;
 };
 
+export function UploadSourceAction({ redirectTo }: UploadSourceActionProps) {
+    const [showUploadModal, setShowUploadModal] = useState(false);
+
+    const form = useForm<UploadSourceFormData>({
+        title: '',
+        source_type: 'file',
+        text: '',
+        upload: null,
+        redirect_to: redirectTo,
+    });
+
+    const closeUploadModal = () => {
+        setShowUploadModal(false);
+        form.clearErrors();
+    };
+
+    const updateSourceType = (sourceType: UploadSourceType) => {
+        form.setData({
+            ...form.data,
+            source_type: sourceType,
+            text: sourceType === 'text' ? form.data.text : '',
+            upload: sourceType === 'file' ? form.data.upload : null,
+        });
+        form.clearErrors('text', 'upload');
+    };
+
+    const submitUpload = (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        form.transform((data) => ({
+            ...data,
+            text: data.source_type === 'text' ? data.text : '',
+            upload: data.source_type === 'file' ? data.upload : null,
+        }));
+        form.post(inputSources.store.url(), {
+            forceFormData: true,
+            onSuccess: () => {
+                setShowUploadModal(false);
+                form.reset();
+            },
+        });
+    };
+
+    return (
+        <>
+            <Button
+                type="button"
+                variant="primary"
+                onClick={() => setShowUploadModal(true)}
+            >
+                Upload source
+            </Button>
+
+            <UploadSourceModal
+                show={showUploadModal}
+                title="Upload source"
+                form={form}
+                onClose={closeUploadModal}
+                onSubmit={submitUpload}
+                onSourceTypeChange={updateSourceType}
+            />
+        </>
+    );
+}
+
 export function UploadSourceModal({
     show,
     title,
     form,
-    sourceTypes = ['text', 'file'],
+    sourceTypes = ['file', 'text'],
     onClose,
     onSubmit,
     onSourceTypeChange,

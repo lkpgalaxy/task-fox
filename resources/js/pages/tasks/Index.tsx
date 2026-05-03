@@ -14,13 +14,8 @@ import {
     Select,
     Textarea,
 } from '@/components/ui';
-import { UploadSourceModal } from '@/components/upload-source-modal';
-import type {
-    UploadSourceFormData,
-    UploadSourceType,
-} from '@/components/upload-source-modal';
+import { UploadSourceAction } from '@/components/upload-source-modal';
 import { cn } from '@/lib/utils';
-import inputSources from '@/routes/input-sources';
 import tasks from '@/routes/tasks';
 
 type Criterion = {
@@ -209,7 +204,6 @@ export default function TasksIndex() {
     } = page.props;
 
     const [showCreateModal, setShowCreateModal] = useState(false);
-    const [showImportModal, setShowImportModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
     const [editingTask, setEditingTask] = useState<TaskRecord | null>(null);
 
@@ -237,13 +231,6 @@ export default function TasksIndex() {
         assignee_user_id: '',
         source_input_id: '',
         acceptance_criteria: [emptyCriterion()],
-    });
-
-    const analyzeForm = useForm<UploadSourceFormData>({
-        title: '',
-        source_type: 'text',
-        text: '',
-        upload: null,
     });
 
     const groupedTasks = useMemo(() => {
@@ -287,21 +274,6 @@ export default function TasksIndex() {
     const openCreateModal = () => {
         resetCreateForm();
         setShowCreateModal(true);
-    };
-
-    const closeImportModal = () => {
-        setShowImportModal(false);
-        analyzeForm.clearErrors();
-    };
-
-    const updateImportSourceType = (sourceType: UploadSourceType) => {
-        analyzeForm.setData({
-            ...analyzeForm.data,
-            source_type: sourceType,
-            text: sourceType === 'text' ? analyzeForm.data.text : '',
-            upload: sourceType === 'file' ? analyzeForm.data.upload : null,
-        });
-        analyzeForm.clearErrors('text', 'upload');
     };
 
     const openTaskDetails = (taskId: number) => {
@@ -427,22 +399,6 @@ export default function TasksIndex() {
         });
     };
 
-    const submitImport = (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        analyzeForm.transform((data) => ({
-            ...data,
-            text: data.source_type === 'text' ? data.text : '',
-            upload: data.source_type === 'file' ? data.upload : null,
-        }));
-        analyzeForm.post(inputSources.store.url(), {
-            forceFormData: true,
-            onSuccess: () => {
-                setShowImportModal(false);
-                analyzeForm.reset();
-            },
-        });
-    };
-
     const submitApprove = (taskId: number) => {
         router.post(
             tasks.approve.url(taskId),
@@ -488,13 +444,7 @@ export default function TasksIndex() {
             showHeaderText={false}
             actions={
                 <>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={() => setShowImportModal(true)}
-                    >
-                        Import source
-                    </Button>
+                    <UploadSourceAction />
                     <Button
                         type="button"
                         variant="primary"
@@ -623,15 +573,6 @@ export default function TasksIndex() {
                 />
             </TaskEditorModal>
 
-            <UploadSourceModal
-                show={showImportModal}
-                title="Import input source"
-                form={analyzeForm}
-                onClose={closeImportModal}
-                onSubmit={submitImport}
-                onSourceTypeChange={updateImportSourceType}
-            />
-
             <Modal
                 show={selectedTask !== null && !showEditModal}
                 onClose={closeTaskDetails}
@@ -678,8 +619,7 @@ function TaskCard({
                 {task.description || 'No description'}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-tertiary">
-                <span>#{task.id}</span>
-                <span>{taskPriorityLabel(task.priority)}</span>
+                <Badge>{taskPriorityLabel(task.priority)}</Badge>
                 {task.project ? <Badge>{task.project.name}</Badge> : null}
                 {task.latest_ai_run ? (
                     <Badge value={task.latest_ai_run.status}>
