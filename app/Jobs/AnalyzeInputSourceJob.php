@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Contracts\TaskExtractor;
 use App\Models\AiRunLog;
 use App\Models\InputSource;
+use App\Models\Project;
 use App\Models\Task;
 use App\Models\User;
 use Exception;
@@ -40,16 +41,25 @@ class AnalyzeInputSourceJob implements ShouldQueue
         $this->log($inputSource, 'info', 'Input source analysis started');
 
         try {
-            $extractedItems = $extractor->extract($inputSource);
+            $projects = Project::query()
+                ->orderBy('name')
+                ->get()
+                ->map(fn (Project $project): array => $project->asSummary())
+                ->values()
+                ->toArray();
+
+            $extractedItems = $extractor->extract($inputSource, $projects);
             $items = $this->normalizeExtractedItems($extractedItems);
+            $validProjectIds = Project::query()->pluck('id')->all();
 
             if ($items === []) {
                 throw new Exception('No tasks could be extracted.');
             }
 
-            DB::transaction(function () use ($inputSource, $items): void {
+            DB::transaction(function () use ($inputSource, $items, $validProjectIds): void {
                 foreach ($items as $item) {
                     $assignee = $this->resolveAssignee((string) Arr::get($item, 'assignee_github_username'));
+                    $projectId = $this->resolveProjectId(Arr::get($item, 'project_id'), $validProjectIds);
                     $criteria = $this->normalizeCriteria((array) Arr::get($item, 'acceptance_criteria', []));
                     $description = trim((string) Arr::get($item, 'description', ''));
                     $questions = $this->normalizeQuestions((array) Arr::get($item, 'questions', []));
@@ -87,6 +97,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
                         'priority' => $this->normalizePriority((string) Arr::get($item, 'priority')),
                         'deadline' => $this->normalizeDate((string) Arr::get($item, 'deadline')),
                         'assignee_user_id' => $assignee?->id,
+                        'project_id' => $projectId,
                         'source_input_id' => $inputSource->id,
                     ]);
                 }
@@ -121,7 +132,19 @@ class AnalyzeInputSourceJob implements ShouldQueue
     private function analysisResultTasks(array $items): array
     {
         return Collection::make($items)
-            ->map(static fn (array $item): array => Arr::except($item, ['questions']))
+            ->map(static function (array $item): array {
+                $task = Arr::except($item, ['questions']);
+                $task['acceptance_criteria'] = Collection::make((array) Arr::get($task, 'acceptance_criteria', []))
+                    ->filter(static fn (mixed $criterion): bool => is_array($criterion))
+                    ->map(static fn (array $criterion): array => [
+                        'scenario' => (string) Arr::get($criterion, 'body', Arr::get($criterion, 'scenario', '')),
+                        'checked' => (bool) Arr::get($criterion, 'checked', false),
+                    ])
+                    ->values()
+                    ->toArray();
+
+                return $task;
+            })
             ->values()
             ->toArray();
     }
@@ -136,7 +159,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
             'level' => $level,
             'message' => $message,
             'context' => array_merge([
-                'coding_agent' => (string) config('automation.coding_agent.driver', 'codex'),
+                'agent' => (string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex')),
                 'input_source_id' => $inputSource->id,
                 'input_source_title' => $inputSource->title,
                 'analysis_status' => $inputSource->analysis_status,
@@ -231,5 +254,18 @@ class AnalyzeInputSourceJob implements ShouldQueue
         }
 
         return Task::PRIORITY_MEDIUM;
+    }
+
+    private function resolveProjectId(mixed $projectId, array $validProjectIds): ?int
+    {
+        if (! is_numeric((string) $projectId)) {
+            return null;
+        }
+
+        $id = (int) $projectId;
+
+        return in_array($id, $validProjectIds, true)
+            ? $id
+            : null;
     }
 }

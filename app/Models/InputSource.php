@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
@@ -16,9 +17,18 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'analysis_result',
     'analysis_status',
     'last_analysis_error',
+    'project_id',
 ])]
 class InputSource extends Model
 {
+    /**
+     * @return BelongsTo<Project, InputSource>
+     */
+    public function project(): BelongsTo
+    {
+        return $this->belongsTo(Project::class);
+    }
+
     /**
      * @return array<string, string>
      */

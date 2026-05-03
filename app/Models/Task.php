@@ -18,6 +18,7 @@ use Illuminate\Database\Query\Builder;
     'deadline',
     'assignee_user_id',
     'source_input_id',
+    'project_id',
     'approved_by_user_id',
     'approved_at',
     'rejected_at',
@@ -57,6 +58,7 @@ class Task extends Model
         'deadline',
         'assignee_user_id',
         'source_input_id',
+        'project_id',
     ];
 
     /**
@@ -110,6 +112,14 @@ class Task extends Model
     public function sourceInput(): BelongsTo
     {
         return $this->belongsTo(InputSource::class, 'source_input_id');
+    }
+
+    /**
+     * @return BelongsTo<Project, Task>
+     */
+    public function project(): BelongsTo
+    {
+        return $this->belongsTo(Project::class, 'project_id');
     }
 
     /**

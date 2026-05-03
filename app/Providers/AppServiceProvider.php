@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Contracts\Agent;
 use App\Contracts\CodingAgent;
 use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
@@ -39,14 +40,16 @@ class AppServiceProvider extends ServiceProvider
     protected function registerDomainBindings(): void
     {
         $this->app->bind(TaskExtractor::class, AgentTaskExtractor::class);
+        $this->app->bind(Agent::class, function (): Agent {
+            return match ((string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex'))) {
+                'codex' => new CodexCodingAgent,
+                default => new CodexCodingAgent,
+            };
+        });
         $this->app->bind(CodingAgent::class, function (): CodingAgent {
-            return match ((string) config('automation.coding_agent.driver', 'codex')) {
-                'codex' => new CodexCodingAgent([
-                    'REPOSITORY_PATH' => (string) config('automation.repository.path'),
-                ]),
-                default => new CodexCodingAgent([
-                    'REPOSITORY_PATH' => (string) config('automation.repository.path'),
-                ]),
+            return match ((string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex'))) {
+                'codex' => new CodexCodingAgent,
+                default => new CodexCodingAgent,
             };
         });
 

@@ -10,11 +10,14 @@ use Illuminate\Support\Collection;
 
 #[Fillable([
     'task_id',
+    'project_id',
     'status',
     'plan',
     'test_cases',
     'branch_name',
     'repository_path',
+    'workspace_path',
+    'base_branch',
     'pull_request_url',
     'pull_request_number',
     'attempt_count',
@@ -67,6 +70,14 @@ class AiRun extends Model
     public function task(): BelongsTo
     {
         return $this->belongsTo(Task::class);
+    }
+
+    /**
+     * @return BelongsTo<Project, AiRun>
+     */
+    public function project(): BelongsTo
+    {
+        return $this->belongsTo(Project::class);
     }
 
     /**

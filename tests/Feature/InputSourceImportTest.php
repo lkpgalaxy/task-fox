@@ -7,6 +7,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Inertia\Testing\AssertableInertia as Assert;
 
 uses(RefreshDatabase::class);
 
@@ -35,6 +36,49 @@ test('pasted text import creates an input source and queues analysis', function 
     Storage::disk('local')->assertExists($source->file_path);
     expect(Storage::disk('local')->get($source->file_path))->toBe('Follow up with design on the empty state.');
 
+    Queue::assertPushed(AnalyzeInputSourceJob::class);
+});
+
+test('input source management page lists paginated sources', function () {
+    for ($index = 1; $index <= 12; $index++) {
+        InputSource::create([
+            'title' => "Source {$index}",
+            'original_filename' => "source-{$index}.txt",
+            'file_disk' => 'local',
+            'file_path' => "input-sources/source-{$index}.txt",
+            'mime_type' => 'text/plain',
+            'file_size' => 100 + $index,
+            'analysis_status' => $index === 1 ? 'completed' : 'pending',
+        ]);
+    }
+
+    $this->get(route('input-sources.index'))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('input-sources/Index')
+            ->has('sources.data', 10)
+            ->where('sources.meta.current_page', 1)
+            ->where('sources.meta.last_page', 2)
+            ->where('sources.meta.total', 12)
+            ->has('sources.links.prev')
+            ->has('sources.links.next')
+        );
+});
+
+test('input source imports can redirect back to source management', function () {
+    Queue::fake();
+    Storage::fake('local');
+
+    $response = $this->post(route('input-sources.store'), [
+        'title' => 'Source page upload',
+        'source_type' => 'text',
+        'text' => 'Create tasks from this source.',
+        'redirect_to' => 'input-sources.index',
+    ]);
+
+    $response->assertRedirect(route('input-sources.index'));
+
+    expect(InputSource::query()->sole())->title->toBe('Source page upload');
     Queue::assertPushed(AnalyzeInputSourceJob::class);
 });
 

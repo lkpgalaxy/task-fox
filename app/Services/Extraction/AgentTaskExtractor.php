@@ -2,7 +2,7 @@
 
 namespace App\Services\Extraction;
 
-use App\Contracts\CodingAgent;
+use App\Contracts\Agent;
 use App\Contracts\TaskExtractor;
 use App\Models\InputSource;
 use App\Models\Task;
@@ -13,12 +13,13 @@ use Illuminate\Support\Str;
 
 class AgentTaskExtractor implements TaskExtractor
 {
-    public function __construct(private readonly CodingAgent $codingAgent) {}
+    public function __construct(private readonly Agent $agent) {}
 
     /**
      * @return array<int, array{
      *     title: string,
      *     description: string,
+     *     project_id: int|null,
      *     assignee_github_username: string|null,
      *     priority: string|null,
      *     deadline: string|null,
@@ -26,12 +27,12 @@ class AgentTaskExtractor implements TaskExtractor
      *     questions: array<int, string>,
      * }>
      */
-    public function extract(InputSource $inputSource): array
+    public function extract(InputSource $inputSource, array $projectSummaries = []): array
     {
-        $result = $this->codingAgent->analyzeInputSource($inputSource);
+        $result = $this->agent->analyzeInputSource($inputSource, $projectSummaries);
 
         if (! $result->successful) {
-            throw new Exception($result->error ?: 'Coding agent could not analyze the input source.');
+            throw new Exception($result->error ?: 'Agent could not analyze the input source.');
         }
 
         $tasks = Arr::get($result->payload, 'tasks', []);
@@ -76,12 +77,26 @@ class AgentTaskExtractor implements TaskExtractor
         return [
             'title' => $this->normalizeString(Arr::get($task, 'title', '')),
             'description' => $this->normalizeString(Arr::get($task, 'description', '')),
+            'project_id' => $this->normalizeProjectId(Arr::get($task, 'project_id')),
             'assignee_github_username' => $this->normalizeAssignee(Arr::get($task, 'assignee_github_username')),
             'priority' => $this->normalizePriority(Arr::get($task, 'priority')),
             'deadline' => $this->normalizeDeadline(Arr::get($task, 'deadline')),
             'acceptance_criteria' => $this->normalizeCriteria((array) Arr::get($task, 'acceptance_criteria', [])),
             'questions' => $this->normalizeQuestions((array) Arr::get($task, 'questions', [])),
         ];
+    }
+
+    private function normalizeProjectId(mixed $projectId): ?int
+    {
+        if (is_int($projectId)) {
+            return $projectId;
+        }
+
+        if (is_numeric((string) $projectId)) {
+            return (int) $projectId;
+        }
+
+        return null;
     }
 
     private function normalizeAssignee(mixed $assignee): ?string

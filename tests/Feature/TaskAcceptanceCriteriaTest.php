@@ -2,6 +2,7 @@
 
 use App\Models\AiRun;
 use App\Models\InputSource;
+use App\Models\Project;
 use App\Models\Task;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
@@ -244,6 +245,11 @@ test('task index can select a pending approval task without external messages', 
 test('pending approval task can be approved from the task board', function () {
     Queue::fake();
     User::factory()->create();
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+        'url' => 'https://github.com/example/task-fox',
+    ]);
 
     $task = Task::create([
         'title' => 'Approve me',
@@ -253,6 +259,7 @@ test('pending approval task can be approved from the task board', function () {
         ],
         'status' => Task::STATUS_PENDING_APPROVAL,
         'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
     ]);
 
     $response = $this->post(route('tasks.approve', $task));

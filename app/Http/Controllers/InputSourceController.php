@@ -9,10 +9,67 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class InputSourceController extends Controller
 {
+    public function index(): Response
+    {
+        $sources = InputSource::query()
+            ->select([
+                'id',
+                'title',
+                'original_filename',
+                'file_disk',
+                'file_path',
+                'mime_type',
+                'file_size',
+                'analysis_status',
+                'analysis_result',
+                'last_analysis_error',
+                'created_at',
+                'updated_at',
+            ])
+            ->orderByDesc('created_at')
+            ->paginate(10)
+            ->withQueryString()
+            ->through(fn (InputSource $inputSource): array => [
+                'id' => $inputSource->id,
+                'title' => $inputSource->title,
+                'original_filename' => $inputSource->original_filename,
+                'mime_type' => $inputSource->mime_type,
+                'file_size' => $inputSource->file_size,
+                'analysis_status' => $inputSource->analysis_status,
+                'analysis_result' => $inputSource->analysis_result,
+                'last_analysis_error' => $inputSource->last_analysis_error,
+                'has_file' => $inputSource->hasStoredFile(),
+                'created_at' => $inputSource->created_at?->toIso8601String(),
+                'updated_at' => $inputSource->updated_at?->toIso8601String(),
+            ]);
+
+        return Inertia::render('input-sources/Index', [
+            'sources' => [
+                'data' => $sources->items(),
+                'meta' => [
+                    'current_page' => $sources->currentPage(),
+                    'from' => $sources->firstItem(),
+                    'last_page' => $sources->lastPage(),
+                    'per_page' => $sources->perPage(),
+                    'to' => $sources->lastItem(),
+                    'total' => $sources->total(),
+                ],
+                'links' => [
+                    'first' => $sources->url(1),
+                    'last' => $sources->url($sources->lastPage()),
+                    'prev' => $sources->previousPageUrl(),
+                    'next' => $sources->nextPageUrl(),
+                ],
+            ],
+        ]);
+    }
+
     public function store(StoreInputSourceRequest $request): RedirectResponse
     {
         $title = $request->string('title')->trim()->toString();
@@ -83,7 +140,11 @@ class InputSourceController extends Controller
 
         AnalyzeInputSourceJob::dispatch($source->id);
 
-        return redirect()->route('tasks.index')->with('status', 'Input queued for analysis.');
+        $redirectRoute = $request->string('redirect_to')->toString() === 'input-sources.index'
+            ? 'input-sources.index'
+            : 'tasks.index';
+
+        return redirect()->route($redirectRoute)->with('status', 'Input queued for analysis.');
     }
 
     public function preview(InputSource $inputSource): BinaryFileResponse

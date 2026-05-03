@@ -1,26 +1,26 @@
 <?php
 
-use App\Contracts\CodingAgent;
+use App\Contracts\Agent;
 use App\DataTransferObjects\CodingAgentResult;
-use App\Models\AiRun;
 use App\Models\InputSource;
-use App\Models\Task;
 use App\Services\Extraction\AgentTaskExtractor;
 
-test('it normalizes coding agent task analysis into extractor format', function () {
+test('it normalizes agent task analysis into extractor format', function () {
     $inputSource = new InputSource([
         'title' => 'Meeting notes',
     ]);
 
-    $extractor = new AgentTaskExtractor(new class implements CodingAgent
+    $agent = new class implements Agent
     {
-        public function run(Task $task, AiRun $run): CodingAgentResult
-        {
-            return new CodingAgentResult(successful: true);
-        }
+        /**
+         * @var array<int, array<string, mixed>>
+         */
+        public array $projectSummaries = [];
 
-        public function analyzeInputSource(InputSource $inputSource): CodingAgentResult
+        public function analyzeInputSource(InputSource $inputSource, array $projectSummaries): CodingAgentResult
         {
+            $this->projectSummaries = $projectSummaries;
+
             return new CodingAgentResult(
                 successful: true,
                 payload: [
@@ -28,6 +28,7 @@ test('it normalizes coding agent task analysis into extractor format', function 
                         [
                             'title' => 'Add stored file import',
                             'description' => 'Store uploaded files and analyze them.',
+                            'project_id' => '12',
                             'assignee_github_username' => '@linh',
                             'priority' => 'HIGH',
                             'deadline' => '2026-05-10',
@@ -39,6 +40,7 @@ test('it normalizes coding agent task analysis into extractor format', function 
                         [
                             'title' => ['Create', 'fallback validation'],
                             'description' => ['for' => 'empty analysis'],
+                            'project_id' => 'unknown',
                             'priority' => 'invalid',
                             'deadline' => 'next week',
                             'acceptance_criteria' => [
@@ -50,15 +52,22 @@ test('it normalizes coding agent task analysis into extractor format', function 
                 ],
             );
         }
-    });
+    };
 
-    $tasks = $extractor->extract($inputSource);
+    $extractor = new AgentTaskExtractor($agent);
+    $projectSummaries = [
+        ['id' => 12, 'name' => 'Task Fox'],
+    ];
+
+    $tasks = $extractor->extract($inputSource, $projectSummaries);
 
     expect($tasks)->toHaveCount(2)
+        ->and($agent->projectSummaries)->toBe($projectSummaries)
         ->and($tasks[0])
         ->toMatchArray([
             'title' => 'Add stored file import',
             'description' => 'Store uploaded files and analyze them.',
+            'project_id' => 12,
             'assignee_github_username' => 'linh',
             'priority' => 'high',
             'deadline' => '2026-05-10',
@@ -69,6 +78,7 @@ test('it normalizes coding agent task analysis into extractor format', function 
         ])
         ->and($tasks[1]['title'])->toBe('Create fallback validation')
         ->and($tasks[1]['description'])->toBe('empty analysis')
+        ->and($tasks[1]['project_id'])->toBeNull()
         ->and($tasks[1]['priority'])->toBeNull()
         ->and($tasks[1]['deadline'])->toBeNull()
         ->and($tasks[1]['acceptance_criteria'])->toBe([

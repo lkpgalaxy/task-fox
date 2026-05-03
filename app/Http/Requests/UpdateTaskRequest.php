@@ -31,6 +31,7 @@ class UpdateTaskRequest extends FormRequest
             'deadline' => ['nullable', 'date'],
             'assignee_user_id' => ['nullable', 'integer', 'exists:users,id'],
             'source_input_id' => ['nullable', 'integer', 'exists:input_sources,id'],
+            'project_id' => ['nullable', 'integer', 'exists:projects,id'],
             'acceptance_criteria' => ['required', 'array'],
             'acceptance_criteria.*.body' => ['required', 'string', 'max:1500'],
             'acceptance_criteria.*.checked' => ['required', 'boolean'],

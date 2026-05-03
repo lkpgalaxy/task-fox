@@ -1,9 +1,23 @@
 import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import { useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
-import type { ReactNode } from 'react';
+import type { FormEvent, ReactNode } from 'react';
+import { AppShell } from '@/components/app-shell';
+import {
+    ActionLink,
+    Alert,
+    Badge,
+    Button,
+    Field,
+    Input,
+    Modal,
+    Panel,
+    Select,
+    Textarea,
+} from '@/components/ui';
+import { cn } from '@/lib/utils';
 import inputSources from '@/routes/input-sources';
 import logs from '@/routes/logs';
+import projects from '@/routes/projects';
 import tasks from '@/routes/tasks';
 
 type Criterion = {
@@ -64,6 +78,7 @@ type TaskRecord = {
     status: string;
     priority: string;
     deadline: string | null;
+    project_id: number | null;
     assignee_user_id: number | null;
     source_input_id: number | null;
     approved_by_user_id: number | null;
@@ -73,6 +88,12 @@ type TaskRecord = {
     pull_request_number: number | null;
     assignee: TaskRelation | null;
     approved_by_user: TaskRelation | null;
+    project?: {
+        id: number;
+        name: string;
+        workspace_path: string;
+        url: string | null;
+    } | null;
     source_input: SourceInput | null;
     acceptance_criteria: Criterion[];
     created_at: string | null;
@@ -101,10 +122,16 @@ type TaskRecord = {
     }[];
 };
 
+type ProjectSummary = {
+    id: number;
+    name: string;
+};
+
 type IndexPageProps = {
     tasks: TaskRecord[];
     users: User[];
     sourceInputs: SourceInput[];
+    projects: ProjectSummary[];
     selectedTask: TaskRecord | null;
     taskStatuses: string[];
     priorities: string[];
@@ -115,20 +142,13 @@ type IndexPageProps = {
     errors?: Record<string, string | string[]>;
 };
 
-const formatError = (error: string | string[] | undefined): string | null => {
-    if (Array.isArray(error)) {
-        return error.join(', ');
-    }
-
-    return error ?? null;
-};
-
 type TaskFormData = {
     title: string;
     description: string;
     priority: string;
     deadline: string;
     assignee_user_id: string;
+    project_id: string;
     source_input_id: string;
     acceptance_criteria: Criterion[];
 };
@@ -136,6 +156,20 @@ type TaskFormData = {
 type ImportSourceType = 'text' | 'file';
 
 const emptyCriterion = (): Criterion => ({ body: '', checked: false });
+
+const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
+
+const taskPriorityLabel = (priority: string) => priority.toUpperCase();
+
+const projectRequiredMessage = 'Assign a project before approving this task.';
+
+const formatError = (error: string | string[] | undefined): string | null => {
+    if (Array.isArray(error)) {
+        return error.join(', ');
+    }
+
+    return error ?? null;
+};
 
 const sanitizeCriteria = (criteria: Criterion[]): Criterion[] => {
     const next = criteria
@@ -146,21 +180,6 @@ const sanitizeCriteria = (criteria: Criterion[]): Criterion[] => {
         ? next
         : [{ ...emptyCriterion(), body: 'No acceptance criteria provided.' }];
 };
-
-const statusClasses: Record<string, string> = {
-    draft: 'bg-slate-100 text-slate-800',
-    pending_approval: 'bg-amber-100 text-amber-800',
-    approved: 'bg-sky-100 text-sky-800',
-    running: 'bg-blue-100 text-blue-800',
-    pr_created: 'bg-purple-100 text-purple-800',
-    done: 'bg-emerald-100 text-emerald-800',
-    failed: 'bg-rose-100 text-rose-800',
-    rejected: 'bg-slate-100 text-slate-500',
-};
-
-const taskStatusLabel = (status: string) => status.replace('_', ' ');
-
-const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
 const formatFileSize = (size: number | null): string => {
     if (size === null) {
@@ -180,7 +199,7 @@ const formatFileSize = (size: number | null): string => {
 
 const formatDate = (value: string | null): string => {
     if (!value) {
-        return '—';
+        return 'None';
     }
 
     try {
@@ -196,6 +215,7 @@ export default function TasksIndex() {
         tasks: boardTasks,
         users,
         sourceInputs,
+        projects: projectOptions,
         selectedTask,
         taskStatuses,
         priorities,
@@ -208,13 +228,16 @@ export default function TasksIndex() {
     const [showEditModal, setShowEditModal] = useState(false);
     const [editingTask, setEditingTask] = useState<TaskRecord | null>(null);
 
+    const defaultPriority = priorities.includes('medium')
+        ? 'medium'
+        : (priorities[0] ?? 'medium');
+
     const createForm = useForm<TaskFormData>({
         title: '',
         description: '',
-        priority: priorities.includes('medium')
-            ? 'medium'
-            : (priorities[0] ?? 'medium'),
+        priority: defaultPriority,
         deadline: '',
+        project_id: '',
         assignee_user_id: '',
         source_input_id: '',
         acceptance_criteria: [emptyCriterion()],
@@ -223,10 +246,9 @@ export default function TasksIndex() {
     const editForm = useForm<TaskFormData>({
         title: '',
         description: '',
-        priority: priorities.includes('medium')
-            ? 'medium'
-            : (priorities[0] ?? 'medium'),
+        priority: defaultPriority,
         deadline: '',
+        project_id: '',
         assignee_user_id: '',
         source_input_id: '',
         acceptance_criteria: [emptyCriterion()],
@@ -252,11 +274,7 @@ export default function TasksIndex() {
         });
 
         boardTasks.forEach((task) => {
-            if (!Object.prototype.hasOwnProperty.call(grouped, task.status)) {
-                grouped[task.status] = [];
-            }
-
-            grouped[task.status]?.push(task);
+            grouped[task.status] = [...(grouped[task.status] ?? []), task];
         });
 
         return grouped;
@@ -266,10 +284,9 @@ export default function TasksIndex() {
         createForm.setData({
             title: '',
             description: '',
-            priority: priorities.includes('medium')
-                ? 'medium'
-                : (priorities[0] ?? 'medium'),
+            priority: defaultPriority,
             deadline: '',
+            project_id: '',
             assignee_user_id: '',
             source_input_id: '',
             acceptance_criteria: [emptyCriterion()],
@@ -278,10 +295,9 @@ export default function TasksIndex() {
         createForm.setDefaults({
             title: '',
             description: '',
-            priority: priorities.includes('medium')
-                ? 'medium'
-                : (priorities[0] ?? 'medium'),
+            priority: defaultPriority,
             deadline: '',
+            project_id: '',
             assignee_user_id: '',
             source_input_id: '',
             acceptance_criteria: [emptyCriterion()],
@@ -290,7 +306,6 @@ export default function TasksIndex() {
 
     const openCreateModal = () => {
         resetCreateForm();
-        createForm.clearErrors();
         setShowCreateModal(true);
     };
 
@@ -313,10 +328,7 @@ export default function TasksIndex() {
         router.get(
             tasks.index.url({ query: { task: taskId } }),
             {},
-            {
-                preserveScroll: true,
-                preserveState: true,
-            },
+            { preserveScroll: true, preserveState: true },
         );
     };
 
@@ -324,21 +336,18 @@ export default function TasksIndex() {
         router.get(
             tasks.index.url(),
             {},
-            {
-                preserveScroll: true,
-                preserveState: true,
-            },
+            { preserveScroll: true, preserveState: true },
         );
     };
 
     const startEdit = (task: TaskRecord) => {
         setEditingTask(task);
-        setShowEditModal(true);
         editForm.setData({
             title: task.title,
             description: task.description,
             priority: task.priority,
             deadline: task.deadline ?? '',
+            project_id: task.project_id ? String(task.project_id) : '',
             assignee_user_id: task.assignee_user_id
                 ? String(task.assignee_user_id)
                 : '',
@@ -351,6 +360,7 @@ export default function TasksIndex() {
                     : [emptyCriterion()],
         });
         editForm.clearErrors();
+        setShowEditModal(true);
     };
 
     const closeEditModal = () => {
@@ -433,9 +443,7 @@ export default function TasksIndex() {
             ),
         });
         editForm.patch(tasks.update.url(editingTask.id), {
-            onSuccess: () => {
-                closeEditModal();
-            },
+            onSuccess: closeEditModal,
         });
     };
 
@@ -493,703 +501,522 @@ export default function TasksIndex() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-50 p-6 text-slate-900">
+        <AppShell
+            title="Task Board"
+            description="Analyze input, shape tasks, and track coding-agent execution across the workspace."
+            width="full"
+            showHeaderText={false}
+            actions={
+                <>
+                    <Link
+                        href={projects.index.url()}
+                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
+                    >
+                        Projects
+                    </Link>
+                    <Link
+                        href={inputSources.index.url()}
+                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
+                    >
+                        Sources
+                    </Link>
+                    <Link
+                        href={logs.index.url()}
+                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
+                    >
+                        Logs
+                    </Link>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => setShowImportModal(true)}
+                    >
+                        Import source
+                    </Button>
+                    <Button
+                        type="button"
+                        variant="primary"
+                        onClick={openCreateModal}
+                    >
+                        Create task
+                    </Button>
+                </>
+            }
+        >
             <Head title="Tasks" />
 
-            {flash?.status ? (
-                <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-                    {flash.status}
-                </div>
-            ) : null}
+            <div className="space-y-4">
+                {flash?.status ? <Alert>{flash.status}</Alert> : null}
+                {errors?.status ? (
+                    <Alert tone="danger">{formatError(errors.status)}</Alert>
+                ) : null}
 
-            {errors?.status ? (
-                <div className="mb-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
-                    {formatError(errors.status)}
-                </div>
-            ) : null}
-
-            <div className="mx-auto max-w-7xl space-y-5">
-                <header className="rounded-lg bg-white p-4 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                            <h1 className="text-2xl font-semibold">
-                                Task Board
-                            </h1>
-                            <p className="text-sm text-slate-500">
-                                Analyze input, edit tasks, and track
-                                coding-agent execution in one workspace.
-                            </p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                            <button
-                                type="button"
-                                onClick={openCreateModal}
-                                className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-700"
-                            >
-                                + Create task
-                            </button>
-                            <Link
-                                href={inputSources.index.url()}
-                                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                            >
-                                Manage sources
-                            </Link>
-                            <Link
-                                href={logs.index.url()}
-                                className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                            >
-                                View logs
-                            </Link>
-                        </div>
-                    </div>
-                </header>
-
-                <section className="rounded-lg bg-white p-4 shadow-sm">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                        <div>
-                            <h2 className="text-sm font-semibold">
-                                Input sources
-                            </h2>
-                            <p className="text-xs text-slate-500">
-                                Uploaded and pasted sources queued for task
-                                analysis.
-                            </p>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => setShowImportModal(true)}
-                            className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-700"
-                        >
-                            Upload source
-                        </button>
-                    </div>
-                    <div className="divide-y divide-slate-100">
-                        {sourceInputs.slice(0, 8).map((sourceInput) => (
+                <Panel className="p-3">
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        {sourceInputs.slice(0, 4).map((sourceInput) => (
                             <div
                                 key={sourceInput.id}
-                                className="grid gap-3 py-3 sm:grid-cols-[1fr_auto] sm:items-center"
+                                className="min-w-0 rounded-md border border-hairline bg-surface-2 p-3"
                             >
-                                <div className="min-w-0">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <p className="truncate text-sm font-medium">
-                                            {sourceInput.title}
-                                        </p>
-                                        <span
-                                            className={`rounded-full px-2 py-0.5 text-xs ${statusClasses[sourceInput.analysis_status] ?? 'bg-slate-100 text-slate-700'}`}
-                                        >
-                                            {sourceInput.analysis_status}
-                                        </span>
-                                    </div>
-                                    <p className="mt-1 truncate text-xs text-slate-500">
-                                        {sourceInput.original_filename
-                                            ? `${sourceInput.original_filename} · ${sourceInput.mime_type ?? 'unknown type'} · ${formatFileSize(sourceInput.file_size ?? null)}`
-                                            : 'Pasted text'}
+                                <div className="flex items-center justify-between gap-2">
+                                    <p className="truncate text-sm font-medium text-ink">
+                                        {sourceInput.title}
                                     </p>
+                                    <Badge value={sourceInput.analysis_status}>
+                                        {sourceInput.analysis_status}
+                                    </Badge>
                                 </div>
-                                {sourceInput.has_file ? (
-                                    <a
-                                        href={inputSources.preview.url(
-                                            sourceInput.id,
-                                        )}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="rounded-md border border-slate-300 px-3 py-2 text-center text-sm font-semibold text-slate-900 hover:bg-slate-50"
-                                    >
-                                        Open
-                                    </a>
-                                ) : null}
+                                <p className="mt-1 truncate text-xs text-ink-subtle">
+                                    {sourceInput.original_filename
+                                        ? `${sourceInput.original_filename} · ${sourceInput.mime_type ?? 'unknown type'} · ${formatFileSize(sourceInput.file_size ?? null)}`
+                                        : 'Pasted text'}
+                                </p>
                             </div>
                         ))}
                         {sourceInputs.length === 0 ? (
-                            <p className="py-3 text-sm text-slate-500">
+                            <p className="px-1 py-2 text-sm text-ink-subtle">
                                 No input sources yet.
                             </p>
                         ) : null}
                     </div>
-                </section>
+                </Panel>
 
-                <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <section className="grid min-h-[640px] auto-cols-[minmax(340px,420px)] grid-flow-col gap-3 overflow-x-auto pb-2">
                     {taskStatuses.map((status) => {
                         const tasksInStatus = groupedTasks[status] ?? [];
-
-                        if (tasksInStatus.length === 0) {
-                            return null;
-                        }
 
                         return (
                             <article
                                 key={status}
-                                className="rounded-lg bg-white p-4 shadow-sm"
+                                className="flex max-h-[calc(100vh-240px)] min-h-[520px] flex-col rounded-lg border border-hairline bg-surface-1"
                             >
-                                <h2 className="mb-3 text-sm font-medium tracking-wide text-slate-500 uppercase">
-                                    {status.replace('_', ' ')}
-                                </h2>
-                                <div className="space-y-3">
+                                <div className="flex items-center justify-between gap-2 border-b border-hairline px-3 py-2.5">
+                                    <h2 className="truncate text-xs font-semibold tracking-[0.04em] text-ink-muted uppercase">
+                                        {taskStatusLabel(status)}
+                                    </h2>
+                                    <span className="rounded-md border border-hairline-strong bg-surface-3 px-1.5 py-0.5 text-xs text-ink-subtle">
+                                        {tasksInStatus.length}
+                                    </span>
+                                </div>
+                                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
                                     {tasksInStatus.map((task) => (
-                                        <button
+                                        <TaskCard
                                             key={task.id}
-                                            type="button"
-                                            onClick={() =>
+                                            task={task}
+                                            selected={
+                                                selectedTask?.id === task.id
+                                            }
+                                            onOpen={() =>
                                                 openTaskDetails(task.id)
                                             }
-                                            className="w-full rounded-md border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-slate-300"
-                                        >
-                                            <div className="flex items-start justify-between gap-2">
-                                                <p className="font-medium">
-                                                    {task.title}
-                                                </p>
-                                                <span
-                                                    className={`rounded-full px-2 py-0.5 text-xs ${statusClasses[status] ?? 'bg-slate-100 text-slate-700'}`}
-                                                >
-                                                    {status}
-                                                </span>
-                                            </div>
-                                            <p className="mt-2 text-xs text-slate-500">
-                                                {task.description.slice(0, 90)}
-                                            </p>
-                                            <div className="mt-2 text-xs text-slate-600">
-                                                Priority:{' '}
-                                                {taskPriorityLabel(
-                                                    task.priority,
-                                                )}
-                                            </div>
-                                        </button>
+                                        />
                                     ))}
+                                    {tasksInStatus.length === 0 ? (
+                                        <div className="rounded-md border border-dashed border-hairline-strong bg-surface-2/60 px-3 py-8 text-center text-sm text-ink-tertiary">
+                                            No tasks
+                                        </div>
+                                    ) : null}
                                 </div>
                             </article>
                         );
                     })}
                 </section>
-
-                <Modal
-                    show={showCreateModal}
-                    onClose={() => setShowCreateModal(false)}
-                    title="Create task"
-                >
-                    <form onSubmit={submitCreate} className="space-y-4">
-                        <TaskFormFields
-                            form={createForm}
-                            users={users}
-                            sourceInputs={sourceInputs}
-                            priorities={priorities}
-                            onAddCriterion={() =>
-                                addCriterion(
-                                    createForm.setData,
-                                    createForm.data,
-                                )
-                            }
-                            onRemoveCriterion={(index) =>
-                                removeCriterion(
-                                    createForm.setData,
-                                    createForm.data,
-                                    index,
-                                )
-                            }
-                            onUpdateCriterion={(index, patch) =>
-                                updateCriterion(
-                                    createForm.setData,
-                                    createForm.data,
-                                    index,
-                                    patch,
-                                )
-                            }
-                        />
-                        <div className="flex justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={() => setShowCreateModal(false)}
-                                className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={createForm.processing}
-                                className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                            >
-                                {createForm.processing
-                                    ? 'Creating...'
-                                    : 'Create'}
-                            </button>
-                        </div>
-                    </form>
-                </Modal>
-
-                <Modal
-                    show={showEditModal}
-                    onClose={closeEditModal}
-                    title={`Edit task #${editingTask?.id ?? ''}`}
-                >
-                    <form onSubmit={submitEdit} className="space-y-4">
-                        <TaskFormFields
-                            form={editForm}
-                            users={users}
-                            sourceInputs={sourceInputs}
-                            priorities={priorities}
-                            onAddCriterion={() =>
-                                addCriterion(editForm.setData, editForm.data)
-                            }
-                            onRemoveCriterion={(index) =>
-                                removeCriterion(
-                                    editForm.setData,
-                                    editForm.data,
-                                    index,
-                                )
-                            }
-                            onUpdateCriterion={(index, patch) =>
-                                updateCriterion(
-                                    editForm.setData,
-                                    editForm.data,
-                                    index,
-                                    patch,
-                                )
-                            }
-                        />
-                        <div className="flex justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closeEditModal}
-                                className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={editForm.processing}
-                                className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                            >
-                                {editForm.processing ? 'Saving...' : 'Save'}
-                            </button>
-                        </div>
-                    </form>
-                </Modal>
-
-                <Modal
-                    show={showImportModal}
-                    onClose={closeImportModal}
-                    title="Import input source"
-                >
-                    <form onSubmit={submitImport} className="space-y-4">
-                        <label className="grid gap-1 text-sm">
-                            <span>Title (optional)</span>
-                            <input
-                                type="text"
-                                value={analyzeForm.data.title}
-                                onChange={(event) =>
-                                    analyzeForm.setData(
-                                        'title',
-                                        event.target.value,
-                                    )
-                                }
-                                className="rounded-md border border-slate-300 px-2 py-1"
-                            />
-                        </label>
-
-                        <fieldset className="space-y-2">
-                            <legend className="text-sm font-medium text-slate-800">
-                                Input source
-                            </legend>
-                            <div className="grid gap-2 sm:grid-cols-2">
-                                {(['text', 'file'] as ImportSourceType[]).map(
-                                    (sourceType) => (
-                                        <label
-                                            key={sourceType}
-                                            className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-sm transition ${
-                                                analyzeForm.data.source_type ===
-                                                sourceType
-                                                    ? 'border-slate-900 bg-slate-900 text-white'
-                                                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                                            }`}
-                                        >
-                                            <input
-                                                type="radio"
-                                                name="source_type"
-                                                value={sourceType}
-                                                checked={
-                                                    analyzeForm.data
-                                                        .source_type ===
-                                                    sourceType
-                                                }
-                                                onChange={() =>
-                                                    updateImportSourceType(
-                                                        sourceType,
-                                                    )
-                                                }
-                                                className="sr-only"
-                                            />
-                                            <span className="font-semibold">
-                                                {sourceType === 'text'
-                                                    ? 'Paste text'
-                                                    : 'Upload file'}
-                                            </span>
-                                            <span
-                                                className={
-                                                    analyzeForm.data
-                                                        .source_type ===
-                                                    sourceType
-                                                        ? 'text-slate-200'
-                                                        : 'text-slate-500'
-                                                }
-                                            >
-                                                {sourceType === 'text'
-                                                    ? 'Manual input'
-                                                    : '.txt, .md, or .pdf'}
-                                            </span>
-                                        </label>
-                                    ),
-                                )}
-                            </div>
-                        </fieldset>
-
-                        {analyzeForm.data.source_type === 'text' ? (
-                            <label className="grid gap-1 text-sm">
-                                <span>Text</span>
-                                <textarea
-                                    value={analyzeForm.data.text}
-                                    onChange={(event) =>
-                                        analyzeForm.setData(
-                                            'text',
-                                            event.target.value,
-                                        )
-                                    }
-                                    rows={8}
-                                    className="rounded-md border border-slate-300 px-2 py-1"
-                                    placeholder="Paste the source text to analyze into tasks..."
-                                />
-                            </label>
-                        ) : (
-                            <div className="grid gap-2 text-sm">
-                                <span>File</span>
-                                <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition hover:border-slate-400 hover:bg-white">
-                                    <span className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white">
-                                        Choose file
-                                    </span>
-                                    <span className="text-xs text-slate-500">
-                                        {analyzeForm.data.upload?.name ??
-                                            'Upload a .txt, .md, or .pdf file up to 10 MB'}
-                                    </span>
-                                    <input
-                                        type="file"
-                                        accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf"
-                                        onChange={(event) => {
-                                            analyzeForm.setData(
-                                                'upload',
-                                                event.currentTarget
-                                                    .files?.[0] ?? null,
-                                            );
-                                        }}
-                                        className="sr-only"
-                                    />
-                                </label>
-                            </div>
-                        )}
-                        {formatError(analyzeForm.errors.text) ? (
-                            <p className="text-xs text-rose-600">
-                                {formatError(analyzeForm.errors.text)}
-                            </p>
-                        ) : null}
-                        {analyzeForm.errors.upload ? (
-                            <p className="text-xs text-rose-600">
-                                {formatError(analyzeForm.errors.upload)}
-                            </p>
-                        ) : null}
-
-                        <div className="flex justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closeImportModal}
-                                className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={analyzeForm.processing}
-                                className="rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                            >
-                                {analyzeForm.processing
-                                    ? 'Submitting...'
-                                    : 'Analyze'}
-                            </button>
-                        </div>
-                    </form>
-                </Modal>
-
-                <Modal
-                    show={selectedTask !== null && !showEditModal}
-                    onClose={closeTaskDetails}
-                    title={
-                        selectedTask
-                            ? `Task #${selectedTask.id}`
-                            : 'Task details'
-                    }
-                >
-                    {selectedTask ? (
-                        <div className="space-y-5">
-                            <div className="flex flex-col gap-4 border-b border-slate-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
-                                <div className="min-w-0 space-y-3">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <span
-                                            className={`rounded-md px-2 py-1 text-xs font-medium ${statusClasses[selectedTask.status] ?? 'bg-slate-100 text-slate-700'}`}
-                                        >
-                                            {taskStatusLabel(
-                                                selectedTask.status,
-                                            )}
-                                        </span>
-                                        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
-                                            {taskPriorityLabel(
-                                                selectedTask.priority,
-                                            )}{' '}
-                                            priority
-                                        </span>
-                                        {selectedTask.latest_ai_run ? (
-                                            <span className="rounded-md bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700">
-                                                Run{' '}
-                                                {taskStatusLabel(
-                                                    selectedTask.latest_ai_run
-                                                        .status,
-                                                )}
-                                            </span>
-                                        ) : null}
-                                    </div>
-                                    <h2 className="text-xl leading-tight font-semibold text-slate-950">
-                                        {selectedTask.title}
-                                    </h2>
-                                    <p className="max-w-3xl text-sm leading-6 text-slate-600">
-                                        {selectedTask.description}
-                                    </p>
-                                </div>
-                                <div className="flex shrink-0 flex-wrap gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => startEdit(selectedTask)}
-                                        className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
-                                    >
-                                        Edit
-                                    </button>
-                                    {selectedTask.status ===
-                                    'pending_approval' ? (
-                                        <button
-                                            type="button"
-                                            onClick={() =>
-                                                submitApprove(selectedTask.id)
-                                            }
-                                            className="rounded-md border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
-                                        >
-                                            Approve
-                                        </button>
-                                    ) : null}
-                                    {selectedTask.status !== 'done' ? (
-                                        <button
-                                            type="button"
-                                            onClick={() =>
-                                                submitReject(selectedTask.id)
-                                            }
-                                            className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-900 hover:bg-rose-100"
-                                        >
-                                            Reject
-                                        </button>
-                                    ) : null}
-                                    {selectedTask.pull_request_url ? (
-                                        <button
-                                            type="button"
-                                            onClick={() =>
-                                                submitRefreshPr(selectedTask.id)
-                                            }
-                                            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 hover:bg-slate-50"
-                                        >
-                                            Refresh PR
-                                        </button>
-                                    ) : null}
-                                </div>
-                            </div>
-
-                            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                                <DetailItem label="Task">
-                                    #{selectedTask.id}
-                                </DetailItem>
-                                <DetailItem label="Deadline">
-                                    {selectedTask.deadline ?? 'No deadline'}
-                                </DetailItem>
-                                <DetailItem label="Assignee">
-                                    {selectedTask.assignee?.name ??
-                                        'Unassigned'}
-                                </DetailItem>
-                                <DetailItem label="Approved by">
-                                    {selectedTask.approved_by_user
-                                        ? selectedTask.approved_by_user.name
-                                        : 'Not approved'}
-                                </DetailItem>
-                                <DetailItem label="Source input">
-                                    {selectedTask.source_input?.title ?? 'None'}
-                                </DetailItem>
-                                <DetailItem label="Latest PR">
-                                    <span>
-                                        {selectedTask.pull_request_url ? (
-                                            <a
-                                                href={
-                                                    selectedTask.pull_request_url
-                                                }
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className="font-medium text-slate-950 underline"
-                                            >
-                                                #
-                                                {
-                                                    selectedTask.pull_request_number
-                                                }
-                                            </a>
-                                        ) : (
-                                            'None'
-                                        )}
-                                    </span>
-                                </DetailItem>
-                                <DetailItem label="Created">
-                                    {formatDate(selectedTask.created_at)}
-                                </DetailItem>
-                                <DetailItem label="Updated">
-                                    {formatDate(selectedTask.updated_at)}
-                                </DetailItem>
-                            </div>
-
-                            <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                                <div className="mb-3 flex items-center justify-between gap-3">
-                                    <h3 className="text-sm font-semibold text-slate-950">
-                                        Acceptance criteria
-                                    </h3>
-                                    <span className="text-xs text-slate-500">
-                                        {
-                                            selectedTask.acceptance_criteria
-                                                .length
-                                        }{' '}
-                                        items
-                                    </span>
-                                </div>
-                                <ul className="space-y-2">
-                                    {selectedTask.acceptance_criteria.map(
-                                        (criterion, index) => (
-                                            <li
-                                                key={`${selectedTask.id}-${index}`}
-                                                className="flex gap-3 rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-700"
-                                            >
-                                                <span
-                                                    className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-bold ${criterion.checked ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 bg-white text-transparent'}`}
-                                                >
-                                                    ✓
-                                                </span>
-                                                <span>{criterion.body}</span>
-                                            </li>
-                                        ),
-                                    )}
-                                </ul>
-                            </section>
-
-                            <section className="rounded-lg border border-slate-200 p-4">
-                                <div className="mb-3 flex items-center justify-between gap-3">
-                                    <h3 className="text-sm font-semibold text-slate-950">
-                                        AI runs
-                                    </h3>
-                                    <span className="text-xs text-slate-500">
-                                        {selectedTask.ai_runs?.length ?? 0}{' '}
-                                        total
-                                    </span>
-                                </div>
-                                {selectedTask.ai_runs?.length ? (
-                                    <div className="space-y-3">
-                                        {selectedTask.ai_runs.map((run) => (
-                                            <div
-                                                key={run.id}
-                                                className="rounded-md border border-slate-200 bg-white p-3"
-                                            >
-                                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                                    <p className="text-sm font-medium text-slate-950">
-                                                        Run #{run.id}
-                                                    </p>
-                                                    <span
-                                                        className={`rounded-md px-2 py-1 text-xs font-medium ${statusClasses[run.status] ?? 'bg-slate-100 text-slate-700'}`}
-                                                    >
-                                                        {taskStatusLabel(
-                                                            run.status,
-                                                        )}
-                                                    </span>
-                                                </div>
-                                                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                                                    <span>
-                                                        Branch:{' '}
-                                                        {run.branch_name ??
-                                                            'None'}
-                                                    </span>
-                                                    <span>
-                                                        Attempts:{' '}
-                                                        {run.attempt_count}
-                                                    </span>
-                                                </div>
-                                                {run.pull_request_url ? (
-                                                    <p className="mt-2 truncate text-xs">
-                                                        PR:{' '}
-                                                        <a
-                                                            href={
-                                                                run.pull_request_url
-                                                            }
-                                                            target="_blank"
-                                                            rel="noreferrer"
-                                                            className="text-slate-950 underline"
-                                                        >
-                                                            {
-                                                                run.pull_request_url
-                                                            }
-                                                        </a>
-                                                    </p>
-                                                ) : null}
-                                                {run.last_error ? (
-                                                    <p className="mt-2 rounded-md bg-rose-50 p-2 text-xs text-rose-700">
-                                                        Error: {run.last_error}
-                                                    </p>
-                                                ) : null}
-                                                <details className="mt-3">
-                                                    <summary className="cursor-pointer text-xs font-medium text-slate-700">
-                                                        Run logs
-                                                    </summary>
-                                                    {run.logs.length ? (
-                                                        <ul className="mt-2 space-y-1 text-xs">
-                                                            {run.logs.map(
-                                                                (log) => (
-                                                                    <li
-                                                                        key={
-                                                                            log.id
-                                                                        }
-                                                                        className="rounded border border-slate-200 bg-slate-50 p-2"
-                                                                    >
-                                                                        <span className="font-mono text-slate-700">
-                                                                            {
-                                                                                log.message
-                                                                            }
-                                                                        </span>
-                                                                    </li>
-                                                                ),
-                                                            )}
-                                                        </ul>
-                                                    ) : (
-                                                        <p className="mt-2 text-xs text-slate-500">
-                                                            No logs for this
-                                                            run.
-                                                        </p>
-                                                    )}
-                                                </details>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <p className="mt-1 text-sm text-slate-500">
-                                        No runs yet.
-                                    </p>
-                                )}
-                            </section>
-                        </div>
-                    ) : null}
-                </Modal>
             </div>
+
+            <TaskEditorModal
+                show={showCreateModal}
+                title="Create task"
+                processing={createForm.processing}
+                submitLabel="Create"
+                processingLabel="Creating..."
+                onClose={() => setShowCreateModal(false)}
+                onSubmit={submitCreate}
+            >
+                <TaskFormFields
+                    form={createForm}
+                    users={users}
+                    sourceInputs={sourceInputs}
+                    projects={projectOptions}
+                    priorities={priorities}
+                    onAddCriterion={() =>
+                        addCriterion(createForm.setData, createForm.data)
+                    }
+                    onRemoveCriterion={(index) =>
+                        removeCriterion(
+                            createForm.setData,
+                            createForm.data,
+                            index,
+                        )
+                    }
+                    onUpdateCriterion={(index, patch) =>
+                        updateCriterion(
+                            createForm.setData,
+                            createForm.data,
+                            index,
+                            patch,
+                        )
+                    }
+                />
+            </TaskEditorModal>
+
+            <TaskEditorModal
+                show={showEditModal}
+                title={`Edit task #${editingTask?.id ?? ''}`}
+                processing={editForm.processing}
+                submitLabel="Save"
+                processingLabel="Saving..."
+                onClose={closeEditModal}
+                onSubmit={submitEdit}
+            >
+                <TaskFormFields
+                    form={editForm}
+                    users={users}
+                    sourceInputs={sourceInputs}
+                    projects={projectOptions}
+                    priorities={priorities}
+                    onAddCriterion={() =>
+                        addCriterion(editForm.setData, editForm.data)
+                    }
+                    onRemoveCriterion={(index) =>
+                        removeCriterion(editForm.setData, editForm.data, index)
+                    }
+                    onUpdateCriterion={(index, patch) =>
+                        updateCriterion(
+                            editForm.setData,
+                            editForm.data,
+                            index,
+                            patch,
+                        )
+                    }
+                />
+            </TaskEditorModal>
+
+            <ImportSourceModal
+                show={showImportModal}
+                form={analyzeForm}
+                onClose={closeImportModal}
+                onSubmit={submitImport}
+                onSourceTypeChange={updateImportSourceType}
+            />
+
+            <Modal
+                show={selectedTask !== null && !showEditModal}
+                onClose={closeTaskDetails}
+                title={selectedTask ? selectedTask.title : 'Task details'}
+            >
+                {selectedTask ? (
+                    <TaskDetails
+                        task={selectedTask}
+                        onEdit={() => startEdit(selectedTask)}
+                        onApprove={() => submitApprove(selectedTask.id)}
+                        onReject={() => submitReject(selectedTask.id)}
+                        onRefreshPr={() => submitRefreshPr(selectedTask.id)}
+                    />
+                ) : null}
+            </Modal>
+        </AppShell>
+    );
+}
+
+function TaskCard({
+    task,
+    selected,
+    onOpen,
+}: {
+    task: TaskRecord;
+    selected: boolean;
+    onOpen: () => void;
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onOpen}
+            className={cn(
+                'w-full cursor-pointer rounded-md border bg-surface-2 p-3 text-left transition hover:border-hairline-strong hover:bg-surface-3',
+                selected
+                    ? 'border-primary/70 ring-2 ring-primary-focus/25'
+                    : 'border-hairline',
+            )}
+        >
+            <div className="flex items-start justify-between gap-2">
+                <p className="min-w-0 text-sm leading-5 font-medium text-ink">
+                    {task.title}
+                </p>
+                <Badge value={task.status}>
+                    {taskStatusLabel(task.status)}
+                </Badge>
+            </div>
+            <p className="mt-2 line-clamp-2 text-xs leading-5 text-ink-subtle">
+                {task.description || 'No description'}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-tertiary">
+                <span>#{task.id}</span>
+                <span>{taskPriorityLabel(task.priority)}</span>
+                {task.project ? <span>{task.project.name}</span> : null}
+                {task.latest_ai_run ? (
+                    <Badge value={task.latest_ai_run.status}>
+                        run {taskStatusLabel(task.latest_ai_run.status)}
+                    </Badge>
+                ) : null}
+            </div>
+        </button>
+    );
+}
+
+function TaskDetails({
+    task,
+    onEdit,
+    onApprove,
+    onReject,
+    onRefreshPr,
+}: {
+    task: TaskRecord;
+    onEdit: () => void;
+    onApprove: () => void;
+    onReject: () => void;
+    onRefreshPr: () => void;
+}) {
+    return (
+        <div className="space-y-5">
+            <div className="space-y-4 border-b border-hairline pb-5">
+                <div className="flex flex-wrap items-center gap-2">
+                    <Badge value={task.status}>
+                        {taskStatusLabel(task.status)}
+                    </Badge>
+                    <Badge>{taskPriorityLabel(task.priority)} priority</Badge>
+                    {task.latest_ai_run ? (
+                        <Badge value={task.latest_ai_run.status}>
+                            Run {taskStatusLabel(task.latest_ai_run.status)}
+                        </Badge>
+                    ) : null}
+                </div>
+                <div>
+                    <p className="text-sm leading-6 text-ink-muted">
+                        {task.description}
+                    </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    <Button type="button" onClick={onEdit}>
+                        Edit
+                    </Button>
+                    {task.status === 'pending_approval' ? (
+                        <Button
+                            type="button"
+                            variant="success"
+                            title={
+                                task.project_id === null
+                                    ? projectRequiredMessage
+                                    : undefined
+                            }
+                            disabled={task.project_id === null}
+                            onClick={onApprove}
+                        >
+                            Approve
+                        </Button>
+                    ) : null}
+                    {task.status !== 'done' ? (
+                        <Button
+                            type="button"
+                            variant="danger"
+                            onClick={onReject}
+                        >
+                            Reject
+                        </Button>
+                    ) : null}
+                    {task.pull_request_url ? (
+                        <Button type="button" onClick={onRefreshPr}>
+                            Refresh PR
+                        </Button>
+                    ) : null}
+                </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+                <DetailItem label="Deadline">
+                    {task.deadline ?? 'No deadline'}
+                </DetailItem>
+                <DetailItem label="Assignee">
+                    {task.assignee?.name ?? 'Unassigned'}
+                </DetailItem>
+                <DetailItem label="Approved by">
+                    {task.approved_by_user?.name ?? 'Not approved'}
+                </DetailItem>
+                <DetailItem label="Source input">
+                    {task.source_input?.title ?? 'None'}
+                </DetailItem>
+                <DetailItem label="Project">
+                    {task.project?.name ?? 'Unassigned'}
+                </DetailItem>
+                <DetailItem label="Latest PR">
+                    {task.pull_request_url ? (
+                        <ActionLink
+                            href={task.pull_request_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="min-h-0 px-2 py-1 text-xs"
+                        >
+                            #{task.pull_request_number}
+                        </ActionLink>
+                    ) : (
+                        'None'
+                    )}
+                </DetailItem>
+                <DetailItem label="Created">
+                    {formatDate(task.created_at)}
+                </DetailItem>
+                <DetailItem label="Updated">
+                    {formatDate(task.updated_at)}
+                </DetailItem>
+            </div>
+
+            <Panel className="p-4">
+                <div className="mb-3 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-ink">
+                        Acceptance criteria
+                    </h3>
+                    <span className="text-xs text-ink-subtle">
+                        {task.acceptance_criteria.length} items
+                    </span>
+                </div>
+                <ul className="space-y-2">
+                    {task.acceptance_criteria.map((criterion, index) => (
+                        <li
+                            key={`${task.id}-${index}`}
+                            className="flex gap-3 rounded-md border border-hairline bg-surface-2 p-3 text-sm text-ink-muted"
+                        >
+                            <span
+                                className={cn(
+                                    'mt-0.5 grid size-4 shrink-0 place-items-center rounded-sm border text-[10px] font-bold',
+                                    criterion.checked
+                                        ? 'border-success bg-success text-white'
+                                        : 'border-hairline-strong text-transparent',
+                                )}
+                            >
+                                ✓
+                            </span>
+                            <span>{criterion.body}</span>
+                        </li>
+                    ))}
+                </ul>
+            </Panel>
+
+            <Panel className="p-4">
+                <div className="mb-3 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-ink">AI runs</h3>
+                    <span className="text-xs text-ink-subtle">
+                        {task.ai_runs?.length ?? 0} total
+                    </span>
+                </div>
+                {task.ai_runs?.length ? (
+                    <div className="space-y-3">
+                        {task.ai_runs.map((run) => (
+                            <div
+                                key={run.id}
+                                className="rounded-md border border-hairline bg-surface-2 p-3"
+                            >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <p className="text-sm font-medium text-ink">
+                                        Run #{run.id}
+                                    </p>
+                                    <Badge value={run.status}>
+                                        {taskStatusLabel(run.status)}
+                                    </Badge>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-subtle">
+                                    <span>
+                                        Branch: {run.branch_name ?? 'None'}
+                                    </span>
+                                    <span>Attempts: {run.attempt_count}</span>
+                                </div>
+                                {run.pull_request_url ? (
+                                    <p className="mt-2 truncate text-xs text-ink-subtle">
+                                        PR:{' '}
+                                        <a
+                                            href={run.pull_request_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="text-primary-hover underline"
+                                        >
+                                            {run.pull_request_url}
+                                        </a>
+                                    </p>
+                                ) : null}
+                                {run.last_error ? (
+                                    <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 p-2 text-xs text-red-100">
+                                        Error: {run.last_error}
+                                    </p>
+                                ) : null}
+                                <details className="mt-3">
+                                    <summary className="cursor-pointer text-xs font-medium text-ink-muted">
+                                        Run logs
+                                    </summary>
+                                    {run.logs.length ? (
+                                        <ul className="mt-2 space-y-1 text-xs">
+                                            {run.logs.map((log) => (
+                                                <li
+                                                    key={log.id}
+                                                    className="rounded border border-hairline bg-surface-1 p-2"
+                                                >
+                                                    <span className="font-mono text-ink-muted">
+                                                        {log.message}
+                                                    </span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    ) : (
+                                        <p className="mt-2 text-xs text-ink-subtle">
+                                            No logs for this run.
+                                        </p>
+                                    )}
+                                </details>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="text-sm text-ink-subtle">No runs yet.</p>
+                )}
+            </Panel>
         </div>
+    );
+}
+
+function TaskEditorModal({
+    show,
+    title,
+    processing,
+    submitLabel,
+    processingLabel,
+    onClose,
+    onSubmit,
+    children,
+}: {
+    show: boolean;
+    title: string;
+    processing: boolean;
+    submitLabel: string;
+    processingLabel: string;
+    onClose: () => void;
+    onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+    children: ReactNode;
+}) {
+    return (
+        <Modal show={show} onClose={onClose} title={title}>
+            <form onSubmit={onSubmit} className="space-y-4">
+                {children}
+                <div className="flex justify-end gap-2">
+                    <Button type="button" variant="ghost" onClick={onClose}>
+                        Cancel
+                    </Button>
+                    <Button
+                        type="submit"
+                        variant="primary"
+                        disabled={processing}
+                    >
+                        {processing ? processingLabel : submitLabel}
+                    </Button>
+                </div>
+            </form>
+        </Modal>
     );
 }
 
@@ -1197,6 +1024,7 @@ function TaskFormFields({
     form,
     users,
     sourceInputs,
+    projects,
     priorities,
     onAddCriterion,
     onRemoveCriterion,
@@ -1212,6 +1040,7 @@ function TaskFormFields({
     };
     users: User[];
     sourceInputs: SourceInput[];
+    projects: ProjectSummary[];
     priorities: string[];
     onAddCriterion: () => void;
     onRemoveCriterion: (index: number) => void;
@@ -1219,79 +1048,65 @@ function TaskFormFields({
 }) {
     return (
         <div className="space-y-4">
-            <label className="grid gap-1 text-sm">
-                <span>Title</span>
-                <input
+            <Field label="Title" error={formatError(form.errors.title)}>
+                <Input
                     type="text"
                     value={form.data.title}
                     onChange={(event) =>
                         form.setData('title', event.target.value)
                     }
-                    className="rounded-md border border-slate-300 px-2 py-1"
                 />
-                {typeof form.errors.title === 'string' ? (
-                    <span className="text-xs text-rose-600">
-                        {form.errors.title}
-                    </span>
-                ) : null}
-            </label>
+            </Field>
 
-            <label className="grid gap-1 text-sm">
-                <span>Description</span>
-                <textarea
+            <Field
+                label="Description"
+                error={formatError(form.errors.description)}
+            >
+                <Textarea
                     value={form.data.description}
                     onChange={(event) =>
                         form.setData('description', event.target.value)
                     }
                     rows={4}
-                    className="rounded-md border border-slate-300 px-2 py-1"
                 />
-                {typeof form.errors.description === 'string' ? (
-                    <span className="text-xs text-rose-600">
-                        {form.errors.description}
-                    </span>
-                ) : null}
-            </label>
+            </Field>
 
             <div className="grid gap-4 sm:grid-cols-2">
-                <label className="grid gap-1 text-sm">
-                    <span>Priority</span>
-                    <select
+                <Field label="Priority">
+                    <Select
                         value={form.data.priority}
                         onChange={(event) =>
                             form.setData('priority', event.target.value)
                         }
-                        className="rounded-md border border-slate-300 px-2 py-1"
                     >
                         {priorities.map((priority) => (
                             <option key={priority} value={priority}>
                                 {taskPriorityLabel(priority)}
                             </option>
                         ))}
-                    </select>
-                </label>
-                <label className="grid gap-1 text-sm">
-                    <span>Deadline</span>
-                    <input
+                    </Select>
+                </Field>
+                <Field label="Deadline">
+                    <Input
                         type="date"
                         value={form.data.deadline}
                         onChange={(event) =>
                             form.setData('deadline', event.target.value)
                         }
-                        className="rounded-md border border-slate-300 px-2 py-1"
                     />
-                </label>
+                </Field>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-                <label className="grid gap-1 text-sm">
-                    <span>Assignee</span>
-                    <select
+                <Field
+                    label="Assignee"
+                    error={formatError(form.errors.assignee_user_id)}
+                >
+                    <Select
                         value={form.data.assignee_user_id}
                         onChange={(event) =>
                             form.setData('assignee_user_id', event.target.value)
                         }
-                        className="rounded-md border border-slate-300 px-2 py-1"
                     >
                         <option value="">Unassigned</option>
                         {users.map((user) => (
@@ -1299,47 +1114,68 @@ function TaskFormFields({
                                 {user.name}
                             </option>
                         ))}
-                    </select>
-                </label>
-                <label className="grid gap-1 text-sm">
-                    <span>Source input</span>
-                    <select
-                        value={form.data.source_input_id}
+                    </Select>
+                </Field>
+                <Field
+                    label="Project"
+                    error={formatError(form.errors.project_id)}
+                >
+                    <Select
+                        value={form.data.project_id}
                         onChange={(event) =>
-                            form.setData('source_input_id', event.target.value)
+                            form.setData('project_id', event.target.value)
                         }
-                        className="rounded-md border border-slate-300 px-2 py-1"
                     >
-                        <option value="">None</option>
-                        {sourceInputs.map((sourceInput) => (
-                            <option key={sourceInput.id} value={sourceInput.id}>
-                                {sourceInput.title}
+                        <option value="">No project</option>
+                        {projects.map((project) => (
+                            <option key={project.id} value={project.id}>
+                                {project.name}
                             </option>
                         ))}
-                    </select>
-                </label>
+                    </Select>
+                </Field>
             </div>
 
-            <div>
-                <div className="mb-2 flex items-center justify-between">
-                    <span className="text-sm font-medium">
+            <Field
+                label="Source input"
+                error={formatError(form.errors.source_input_id)}
+            >
+                <Select
+                    value={form.data.source_input_id}
+                    onChange={(event) =>
+                        form.setData('source_input_id', event.target.value)
+                    }
+                >
+                    <option value="">None</option>
+                    {sourceInputs.map((sourceInput) => (
+                        <option key={sourceInput.id} value={sourceInput.id}>
+                            {sourceInput.title}
+                        </option>
+                    ))}
+                </Select>
+            </Field>
+
+            <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-ink-muted">
                         Acceptance criteria
                     </span>
-                    <button
+                    <Button
                         type="button"
+                        variant="secondary"
+                        className="min-h-8 px-2 py-1 text-xs"
                         onClick={onAddCriterion}
-                        className="rounded-md border border-slate-300 px-2 py-1 text-xs"
                     >
-                        + Add
-                    </button>
+                        Add
+                    </Button>
                 </div>
                 {form.data.acceptance_criteria.map((criterion, index) => (
                     <div
-                        key={`${form.data.title}-${index}`}
-                        className="mb-2 grid gap-2"
+                        key={`${index}-${criterion.checked}`}
+                        className="grid gap-2 rounded-md border border-hairline bg-surface-2 p-2"
                     >
                         <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                            <input
+                            <Input
                                 type="text"
                                 value={criterion.body}
                                 onChange={(event) =>
@@ -1347,10 +1183,9 @@ function TaskFormFields({
                                         body: event.target.value,
                                     })
                                 }
-                                className="rounded-md border border-slate-300 px-2 py-1"
                                 placeholder="Acceptance criteria item"
                             />
-                            <label className="flex items-center gap-2 text-sm">
+                            <label className="flex min-h-9 items-center gap-2 text-sm text-ink-muted">
                                 <input
                                     type="checkbox"
                                     checked={criterion.checked}
@@ -1363,22 +1198,165 @@ function TaskFormFields({
                                 Done
                             </label>
                         </div>
-                        <button
+                        <Button
                             type="button"
+                            variant="danger"
+                            className="min-h-8 justify-self-end px-2 py-1 text-xs"
                             onClick={() => onRemoveCriterion(index)}
-                            className="justify-self-end rounded-md border border-rose-200 px-2 py-1 text-xs text-rose-700"
                         >
                             Remove
-                        </button>
+                        </Button>
                     </div>
                 ))}
+                {formatError(form.errors.acceptance_criteria) ? (
+                    <p className="text-xs text-red-200">
+                        {formatError(form.errors.acceptance_criteria)}
+                    </p>
+                ) : null}
             </div>
-            {typeof form.errors.acceptance_criteria === 'string' ? (
-                <p className="text-xs text-rose-600">
-                    {form.errors.acceptance_criteria}
-                </p>
-            ) : null}
         </div>
+    );
+}
+
+function ImportSourceModal({
+    show,
+    form,
+    onClose,
+    onSubmit,
+    onSourceTypeChange,
+}: {
+    show: boolean;
+    form: ReturnType<
+        typeof useForm<{
+            title: string;
+            source_type: ImportSourceType;
+            text: string;
+            upload: File | null;
+        }>
+    >;
+    onClose: () => void;
+    onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+    onSourceTypeChange: (sourceType: ImportSourceType) => void;
+}) {
+    return (
+        <Modal show={show} onClose={onClose} title="Import input source">
+            <form onSubmit={onSubmit} className="space-y-4">
+                <Field label="Title (optional)">
+                    <Input
+                        type="text"
+                        value={form.data.title}
+                        onChange={(event) =>
+                            form.setData('title', event.target.value)
+                        }
+                    />
+                </Field>
+
+                <fieldset className="space-y-2">
+                    <legend className="text-sm font-medium text-ink-muted">
+                        Input source
+                    </legend>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                        {(['text', 'file'] as ImportSourceType[]).map(
+                            (sourceType) => (
+                                <label
+                                    key={sourceType}
+                                    className={cn(
+                                        'flex cursor-pointer items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm transition',
+                                        form.data.source_type === sourceType
+                                            ? 'border-primary bg-primary/15 text-ink'
+                                            : 'border-hairline bg-surface-2 text-ink-muted hover:bg-surface-3',
+                                    )}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="source_type"
+                                        value={sourceType}
+                                        checked={
+                                            form.data.source_type === sourceType
+                                        }
+                                        onChange={() =>
+                                            onSourceTypeChange(sourceType)
+                                        }
+                                        className="sr-only"
+                                    />
+                                    <span className="font-semibold">
+                                        {sourceType === 'text'
+                                            ? 'Paste text'
+                                            : 'Upload file'}
+                                    </span>
+                                    <span className="text-xs text-ink-subtle">
+                                        {sourceType === 'text'
+                                            ? 'Manual input'
+                                            : '.txt, .md, or .pdf'}
+                                    </span>
+                                </label>
+                            ),
+                        )}
+                    </div>
+                </fieldset>
+
+                {form.data.source_type === 'text' ? (
+                    <Field label="Text">
+                        <Textarea
+                            value={form.data.text}
+                            onChange={(event) =>
+                                form.setData('text', event.target.value)
+                            }
+                            rows={8}
+                            placeholder="Paste the source text to analyze into tasks..."
+                        />
+                    </Field>
+                ) : (
+                    <div className="grid gap-2 text-sm text-ink-muted">
+                        <span>File</span>
+                        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-hairline-strong bg-surface-2 px-4 py-6 text-center transition hover:border-primary/60">
+                            <span className="rounded-md border border-primary bg-primary px-3 py-2 text-sm font-semibold text-white">
+                                Choose file
+                            </span>
+                            <span className="text-xs text-ink-subtle">
+                                {form.data.upload?.name ??
+                                    'Upload a .txt, .md, or .pdf file up to 10 MB'}
+                            </span>
+                            <input
+                                type="file"
+                                accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf"
+                                onChange={(event) =>
+                                    form.setData(
+                                        'upload',
+                                        event.currentTarget.files?.[0] ?? null,
+                                    )
+                                }
+                                className="sr-only"
+                            />
+                        </label>
+                    </div>
+                )}
+
+                {formatError(form.errors.text) ? (
+                    <p className="text-xs text-red-200">
+                        {formatError(form.errors.text)}
+                    </p>
+                ) : null}
+                {formatError(form.errors.upload) ? (
+                    <p className="text-xs text-red-200">
+                        {formatError(form.errors.upload)}
+                    </p>
+                ) : null}
+
+                <div className="flex justify-end gap-2">
+                    <Button type="button" variant="ghost" onClick={onClose}>
+                        Cancel
+                    </Button>
+                    <Button
+                        type="submit"
+                        variant="primary"
+                        disabled={form.processing}
+                    >
+                        {form.processing ? 'Submitting...' : 'Analyze'}
+                    </Button>
+                </div>
+            </form>
+        </Modal>
     );
 }
 
@@ -1390,53 +1368,10 @@ function DetailItem({
     children: ReactNode;
 }) {
     return (
-        <div className="rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-xs font-medium text-slate-500">{label}</p>
-            <p className="mt-1 truncate text-sm font-medium text-slate-900">
+        <div className="rounded-md border border-hairline bg-surface-2 p-3">
+            <p className="text-xs font-medium text-ink-tertiary">{label}</p>
+            <div className="mt-1 min-w-0 truncate text-sm font-medium text-ink-muted">
                 {children}
-            </p>
-        </div>
-    );
-}
-
-function Modal({
-    show,
-    onClose,
-    title,
-    children,
-}: {
-    show: boolean;
-    onClose: () => void;
-    title: string;
-    children: ReactNode;
-}) {
-    if (!show) {
-        return null;
-    }
-
-    return (
-        <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4"
-            role="dialog"
-            aria-modal="true"
-            aria-label={title}
-        >
-            <div className="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-lg bg-white shadow-xl ring-1 ring-slate-950/10">
-                <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 py-4">
-                    <h2 className="truncate text-base font-semibold text-slate-950">
-                        {title}
-                    </h2>
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                    >
-                        Close
-                    </button>
-                </div>
-                <div className="max-h-[calc(90vh-65px)] overflow-y-auto p-5">
-                    {children}
-                </div>
             </div>
         </div>
     );

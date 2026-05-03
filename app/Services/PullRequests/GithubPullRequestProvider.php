@@ -67,7 +67,7 @@ class GithubPullRequestProvider implements PullRequestProvider
             $pullRequestUrl,
             '--add-reviewer',
             $user->github_username,
-        ], $this->repositoryPath());
+        ], $this->resolveExecutionPath());
 
         if (! $result->isSuccessful()) {
             throw new Exception('gh pr review request failed: '.trim((string) $result->getErrorOutput()));
@@ -83,7 +83,7 @@ class GithubPullRequestProvider implements PullRequestProvider
             $pullRequestUrl,
             '--json',
             'state',
-        ], $this->repositoryPath());
+        ], $this->resolveExecutionPath());
 
         if (! $result->isSuccessful()) {
             return PullRequestReviewState::UNKNOWN;
@@ -135,18 +135,18 @@ Acceptance criteria:
 BODY;
     }
 
-    private function repositoryPath(): string
+    private function resolveExecutionPath(?string $path = null): string
     {
-        return (string) config('automation.repository.path', base_path());
+        return $path !== null && $path !== '' ? $path : base_path();
     }
 
     private function resolveRepositoryPath(AiRun $run): string
     {
-        if ($run->repository_path === null || $run->repository_path === '') {
-            return $this->repositoryPath();
+        if ($run->workspace_path === null || $run->workspace_path === '') {
+            return $this->resolveExecutionPath($run->repository_path);
         }
 
-        return $run->repository_path;
+        return $run->workspace_path;
     }
 
     private function runProcess(array $command, string $path): Process

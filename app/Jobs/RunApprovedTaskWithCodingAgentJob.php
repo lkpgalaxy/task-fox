@@ -13,7 +13,7 @@ use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Foundation\Queue\SerializesModels;
+use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 use Throwable;
@@ -38,8 +38,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         $task = $run->task;
-        $repositoryPath = $this->resolveRepositoryPath($run);
+        $repositoryPath = $this->resolveExecutionPath($run);
         $branchName = $this->makeBranchName($task);
+        $baseBranch = $this->resolveBaseBranch($run);
 
         try {
             $run->update([
@@ -56,8 +57,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'run_id' => $run->id,
             ]);
 
-            $this->assertRepositoryReady($repositoryPath);
-            $this->createBranch($repositoryPath, $branchName);
+            $this->assertRepositoryReady($repositoryPath, $baseBranch);
+            $this->createBranch($repositoryPath, $branchName, $baseBranch);
 
             $maxAttempts = max(1, (int) config('automation.agent.retry_limit', 2));
             $passed = false;
@@ -187,7 +188,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return 'ai-task-'.(string) $task->id.'-'.Str::limit($slug, 40, '');
     }
 
-    private function assertRepositoryReady(string $path): void
+    private function assertRepositoryReady(string $path, string $baseBranch): void
     {
         if ($path === '') {
             throw new Exception('Repository path is missing from configuration.');
@@ -206,10 +207,22 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         if (trim((string) $cleanCheck->getOutput()) !== '') {
             throw new Exception('Repository is not clean; commit or stash changes before running AI agent.');
         }
+
+        $branch = $this->normalizeBaseBranch($baseBranch);
+        $baseBranchCheck = $this->runProcess(['git', 'rev-parse', '--verify', $branch], $path);
+        if (! $baseBranchCheck->isSuccessful()) {
+            throw new Exception("Base branch {$branch} does not exist in repository.");
+        }
     }
 
-    private function createBranch(string $path, string $branchName): void
+    private function createBranch(string $path, string $branchName, string $baseBranch): void
     {
+        $branch = $this->normalizeBaseBranch($baseBranch);
+        $result = $this->runProcess(['git', 'checkout', $branch], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to checkout base branch: '.trim((string) $result->getErrorOutput()));
+        }
+
         $result = $this->runProcess(['git', 'checkout', '-B', $branchName], $path);
 
         if (! $result->isSuccessful()) {
@@ -251,9 +264,29 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
     }
 
-    private function resolveRepositoryPath(AiRun $run): string
+    private function resolveBaseBranch(AiRun $run): string
     {
-        return (string) ($run->repository_path ?: config('automation.repository.path'));
+        return $this->normalizeBaseBranch((string) $run->base_branch);
+    }
+
+    private function normalizeBaseBranch(string $baseBranch): string
+    {
+        $trimmed = trim($baseBranch);
+
+        return $trimmed === '' ? 'main' : $trimmed;
+    }
+
+    private function resolveExecutionPath(AiRun $run): string
+    {
+        if ($run->workspace_path !== null && $run->workspace_path !== '') {
+            return $run->workspace_path;
+        }
+
+        if ($run->repository_path !== null && $run->repository_path !== '') {
+            return $run->repository_path;
+        }
+
+        return base_path();
     }
 
     private function runProcess(array|string $command, string $path): Process

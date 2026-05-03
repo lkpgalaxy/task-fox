@@ -11,11 +11,12 @@ interface TaskExtractor
      *     title: string,
      *     description: string,
      *     assignee_github_username: string|null,
+     *     project_id: int|null,
      *     priority: string|null,
      *     deadline: string|null,
      *     acceptance_criteria: array<int, array{body: string, checked: bool}>,
      *     questions: array<int, string>,
      * }>
      */
-    public function extract(InputSource $inputSource): array;
+    public function extract(InputSource $inputSource, array $projectSummaries = []): array;
 }

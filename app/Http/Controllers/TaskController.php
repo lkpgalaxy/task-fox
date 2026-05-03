@@ -10,6 +10,7 @@ use App\Http\Requests\UpdateTaskRequest;
 use App\Jobs\DispatchNextAiRunJob;
 use App\Models\AiRun;
 use App\Models\InputSource;
+use App\Models\Project;
 use App\Models\Task;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
@@ -36,6 +37,7 @@ class TaskController extends Controller
                 'assignee:id,name,github_username',
                 'approvedByUser:id,name,github_username',
                 'sourceInput:id,title,analysis_status',
+                'project:id,name,workspace_path,url',
                 'latestAiRun' => fn ($query) => $query->select([
                     'ai_runs.id',
                     'ai_runs.task_id',
@@ -57,6 +59,7 @@ class TaskController extends Controller
                     'assignee:id,name,github_username',
                     'approvedByUser:id,name,github_username',
                     'sourceInput:id,title,analysis_status',
+                    'project:id,name,workspace_path,url',
                     'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,last_error,started_at,finished_at,updated_at',
                     'aiRuns.logs:id,ai_run_id,level,message,context,created_at',
                     'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
@@ -83,6 +86,13 @@ class TaskController extends Controller
                     'file_size' => $inputSource->file_size,
                     'analysis_status' => $inputSource->analysis_status,
                     'has_file' => $inputSource->hasStoredFile(),
+                ]),
+            'projects' => Project::query()
+                ->orderBy('name')
+                ->get()
+                ->map(fn (Project $project): array => [
+                    'id' => $project->id,
+                    'name' => (string) $project->name,
                 ]),
             'selectedTask' => $selectedTask,
             'taskStatuses' => [
@@ -122,6 +132,7 @@ class TaskController extends Controller
             'priority' => Arr::get($data, 'priority') ?? Task::PRIORITY_MEDIUM,
             'deadline' => Arr::get($data, 'deadline'),
             'assignee_user_id' => $assigneeUserId,
+            'project_id' => Arr::get($data, 'project_id'),
             'source_input_id' => Arr::get($data, 'source_input_id'),
         ]);
 
@@ -148,6 +159,7 @@ class TaskController extends Controller
                 'deadline',
                 'assignee_user_id',
                 'source_input_id',
+                'project_id',
             ]),
         );
         $task->acceptance_criteria = $this->normalizeCriteria($criteria);
@@ -187,6 +199,12 @@ class TaskController extends Controller
 
     public function approve(Task $task): RedirectResponse
     {
+        if ($task->project_id === null) {
+            return back()->withErrors([
+                'project' => 'Assign a project before approving this task.',
+            ]);
+        }
+
         $actor = $this->resolveCurrentUser();
 
         if ($actor === null) {
@@ -251,6 +269,12 @@ class TaskController extends Controller
 
     public function reject(Task $task): RedirectResponse
     {
+        $actor = $this->resolveCurrentUser();
+
+        if ($actor === null) {
+            return back()->withErrors(['actor' => 'No actor available to record rejection.']);
+        }
+
         $task->update([
             'status' => Task::STATUS_REJECTED,
             'rejected_at' => now(),
@@ -343,11 +367,13 @@ class TaskController extends Controller
             'approved_by_user_id' => $task->approved_by_user_id,
             'approved_at' => $task->approved_at?->toIso8601String(),
             'rejected_at' => $task->rejected_at?->toIso8601String(),
+            'project_id' => $task->project_id,
             'pull_request_url' => $task->pull_request_url,
             'pull_request_number' => $task->pull_request_number,
             'assignee' => optional($task->assignee)->only(['id', 'name', 'github_username']),
             'approved_by_user' => optional($task->approvedByUser)->only(['id', 'name', 'github_username']),
             'source_input' => optional($task->sourceInput)->only(['id', 'title', 'analysis_status']),
+            'project' => optional($task->project)->only(['id', 'name', 'workspace_path', 'url']),
             'acceptance_criteria' => $this->normalizeCriteria($task->acceptance_criteria ?? []),
             'created_at' => $task->created_at?->toIso8601String(),
             'updated_at' => $task->updated_at?->toIso8601String(),

@@ -3,16 +3,12 @@
 use App\Services\PullRequests\GithubPullRequestProvider;
 
 return [
-    'repository' => [
-        'path' => env('REPOSITORY_PATH', base_path()),
-        'base_branch' => env('REPOSITORY_BASE_BRANCH', 'main'),
-    ],
-
     'coding_agent' => [
         'driver' => env('CODING_AGENT', 'codex'),
     ],
 
     'agent' => [
+        'driver' => env('AGENT', env('CODING_AGENT', 'codex')),
         'retry_limit' => (int) env('AGENT_RETRY_LIMIT', 2),
     ],
 

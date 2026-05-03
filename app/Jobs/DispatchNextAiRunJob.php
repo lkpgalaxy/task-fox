@@ -45,13 +45,27 @@ class DispatchNextAiRunJob implements ShouldQueue
                 return;
             }
 
+            if ($task->project_id === null) {
+                return;
+            }
+
+            $task->loadMissing('project:id,workspace_path,base_branch');
+
             $task->update(['status' => Task::STATUS_RUNNING]);
+
+            $workspacePath = (string) $task->project?->workspace_path;
+            $baseBranch = trim((string) $task->project?->base_branch) !== ''
+                ? (string) $task->project?->base_branch
+                : 'main';
 
             $run = $task->aiRuns()->create([
                 'status' => AiRun::STATUS_QUEUED,
                 'attempt_count' => 0,
                 'branch_name' => 'pending',
-                'repository_path' => (string) config('automation.repository.path'),
+                'project_id' => $task->project_id,
+                'repository_path' => $workspacePath,
+                'workspace_path' => $workspacePath,
+                'base_branch' => $baseBranch,
             ]);
 
             RunApprovedTaskWithCodingAgentJob::dispatch($run->id);
