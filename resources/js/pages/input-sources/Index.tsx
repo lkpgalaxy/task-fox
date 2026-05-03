@@ -7,22 +7,23 @@ import {
     Badge,
     Button,
     DataTable,
-    Field,
-    Input,
     Modal,
     TableBody,
     TableHead,
     Td,
-    Textarea,
     Th,
 } from '@/components/ui';
-import { cn } from '@/lib/utils';
+import { UploadSourceModal } from '@/components/upload-source-modal';
+import type {
+    UploadSourceFormData,
+    UploadSourceType,
+} from '@/components/upload-source-modal';
 import inputSources from '@/routes/input-sources';
 
 type SourceRecord = {
     id: number;
     title: string;
-    original_filename: string | null;
+    filename: string | null;
     mime_type: string | null;
     file_size: number | null;
     analysis_status: string;
@@ -56,24 +57,6 @@ type PageProps = {
     flash?: {
         status?: string;
     };
-};
-
-type ImportSourceType = 'text' | 'file';
-
-type SourceFormData = {
-    title: string;
-    source_type: ImportSourceType;
-    text: string;
-    upload: File | null;
-    redirect_to: string;
-};
-
-const formatError = (error: string | string[] | undefined): string | null => {
-    if (Array.isArray(error)) {
-        return error.join(', ');
-    }
-
-    return error ?? null;
 };
 
 const formatFileSize = (size: number | null): string => {
@@ -124,7 +107,7 @@ export default function InputSourcesIndex() {
         json: string;
     } | null>(null);
 
-    const form = useForm<SourceFormData>({
+    const form = useForm<UploadSourceFormData>({
         title: '',
         source_type: 'file',
         text: '',
@@ -137,7 +120,7 @@ export default function InputSourcesIndex() {
         form.clearErrors();
     };
 
-    const updateSourceType = (sourceType: ImportSourceType) => {
+    const updateSourceType = (sourceType: UploadSourceType) => {
         form.setData({
             ...form.data,
             source_type: sourceType,
@@ -240,10 +223,7 @@ export default function InputSourcesIndex() {
                                     )}
                                 </Td>
                                 <Td className="text-ink-muted">
-                                    <p>
-                                        {source.original_filename ??
-                                            'Pasted text'}
-                                    </p>
+                                    <p>{source.filename ?? 'Unknown file'}</p>
                                     <p className="text-xs text-ink-tertiary">
                                         {source.mime_type ?? 'unknown type'} ·{' '}
                                         {formatFileSize(source.file_size)}
@@ -324,9 +304,11 @@ export default function InputSourcesIndex() {
                 </nav>
             </div>
 
-            <UploadModal
+            <UploadSourceModal
                 show={showUploadModal}
+                title="Upload source"
                 form={form}
+                sourceTypes={['file', 'text']}
                 onClose={closeUploadModal}
                 onSubmit={submitUpload}
                 onSourceTypeChange={updateSourceType}
@@ -345,140 +327,5 @@ export default function InputSourcesIndex() {
                 ) : null}
             </Modal>
         </AppShell>
-    );
-}
-
-function UploadModal({
-    show,
-    form,
-    onClose,
-    onSubmit,
-    onSourceTypeChange,
-}: {
-    show: boolean;
-    form: ReturnType<typeof useForm<SourceFormData>>;
-    onClose: () => void;
-    onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-    onSourceTypeChange: (sourceType: ImportSourceType) => void;
-}) {
-    return (
-        <Modal show={show} onClose={onClose} title="Upload source">
-            <form onSubmit={onSubmit} className="space-y-4">
-                <Field label="Title (optional)">
-                    <Input
-                        type="text"
-                        value={form.data.title}
-                        onChange={(event) =>
-                            form.setData('title', event.target.value)
-                        }
-                    />
-                </Field>
-
-                <fieldset className="space-y-2">
-                    <legend className="text-sm font-medium text-ink-muted">
-                        Input source
-                    </legend>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                        {(['file', 'text'] as ImportSourceType[]).map(
-                            (sourceType) => (
-                                <label
-                                    key={sourceType}
-                                    className={cn(
-                                        'flex cursor-pointer items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm transition',
-                                        form.data.source_type === sourceType
-                                            ? 'border-primary bg-primary/15 text-ink'
-                                            : 'border-hairline bg-surface-2 text-ink-muted hover:bg-surface-3',
-                                    )}
-                                >
-                                    <input
-                                        type="radio"
-                                        name="source_type"
-                                        value={sourceType}
-                                        checked={
-                                            form.data.source_type === sourceType
-                                        }
-                                        onChange={() =>
-                                            onSourceTypeChange(sourceType)
-                                        }
-                                        className="sr-only"
-                                    />
-                                    <span className="font-semibold">
-                                        {sourceType === 'file'
-                                            ? 'Upload file'
-                                            : 'Paste text'}
-                                    </span>
-                                    <span className="text-xs text-ink-subtle">
-                                        {sourceType === 'file'
-                                            ? '.txt, .md, or .pdf'
-                                            : 'Manual input'}
-                                    </span>
-                                </label>
-                            ),
-                        )}
-                    </div>
-                </fieldset>
-
-                {form.data.source_type === 'file' ? (
-                    <div className="grid gap-2 text-sm text-ink-muted">
-                        <span>File</span>
-                        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-hairline-strong bg-surface-2 px-4 py-6 text-center transition hover:border-primary/60">
-                            <span className="rounded-md border border-primary bg-primary px-3 py-2 text-sm font-semibold text-white">
-                                Choose file
-                            </span>
-                            <span className="text-xs text-ink-subtle">
-                                {form.data.upload?.name ??
-                                    'Upload a .txt, .md, or .pdf file up to 10 MB'}
-                            </span>
-                            <input
-                                type="file"
-                                accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf"
-                                onChange={(event) =>
-                                    form.setData(
-                                        'upload',
-                                        event.currentTarget.files?.[0] ?? null,
-                                    )
-                                }
-                                className="sr-only"
-                            />
-                        </label>
-                    </div>
-                ) : (
-                    <Field label="Text">
-                        <Textarea
-                            value={form.data.text}
-                            onChange={(event) =>
-                                form.setData('text', event.target.value)
-                            }
-                            rows={8}
-                            placeholder="Paste the source text to analyze into tasks..."
-                        />
-                    </Field>
-                )}
-
-                {formatError(form.errors.text) ? (
-                    <p className="text-xs text-red-200">
-                        {formatError(form.errors.text)}
-                    </p>
-                ) : null}
-                {formatError(form.errors.upload) ? (
-                    <p className="text-xs text-red-200">
-                        {formatError(form.errors.upload)}
-                    </p>
-                ) : null}
-
-                <div className="flex justify-end gap-2">
-                    <Button type="button" variant="ghost" onClick={onClose}>
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        variant="primary"
-                        disabled={form.processing}
-                    >
-                        {form.processing ? 'Submitting...' : 'Analyze'}
-                    </Button>
-                </div>
-            </form>
-        </Modal>
     );
 }

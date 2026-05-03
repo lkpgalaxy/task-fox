@@ -5,6 +5,7 @@ use App\Models\InputSource;
 use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
@@ -27,9 +28,9 @@ test('pasted text import creates an input source and queues analysis', function 
 
     expect($source)
         ->title->toBe('Sprint notes')
-        ->original_filename->toBeNull()
+        ->filename->toMatch('/^input-source-\d{8}-\d{6}\.txt$/')
         ->file_disk->toBe('local')
-        ->file_path->toStartWith('input-sources/')
+        ->file_path->toBe("input-sources/{$source->filename}")
         ->mime_type->toBe('text/plain')
         ->file_size->toBe(41);
 
@@ -39,11 +40,42 @@ test('pasted text import creates an input source and queues analysis', function 
     Queue::assertPushed(AnalyzeInputSourceJob::class);
 });
 
+test('pasted text import without a title uses a generated text filename', function () {
+    Queue::fake();
+    Storage::fake('local');
+    Carbon::setTestNow(Carbon::create(2026, 5, 3, 10, 15, 30));
+
+    try {
+        $response = $this->post(route('input-sources.store'), [
+            'source_type' => 'text',
+            'text' => 'Turn the release notes into tasks.',
+        ]);
+
+        $response->assertRedirect(route('tasks.index'));
+
+        $source = InputSource::query()->sole();
+
+        expect($source)
+            ->title->toBe('input-source-20260503-101530')
+            ->filename->toBe('input-source-20260503-101530.txt')
+            ->file_path->toBe('input-sources/input-source-20260503-101530.txt')
+            ->mime_type->toBe('text/plain')
+            ->file_size->toBe(34);
+
+        Storage::disk('local')->assertExists('input-sources/input-source-20260503-101530.txt');
+        expect(Storage::disk('local')->get($source->file_path))->toBe('Turn the release notes into tasks.');
+    } finally {
+        Carbon::setTestNow();
+    }
+
+    Queue::assertPushed(AnalyzeInputSourceJob::class);
+});
+
 test('input source management page lists paginated sources', function () {
     for ($index = 1; $index <= 12; $index++) {
         InputSource::create([
             'title' => "Source {$index}",
-            'original_filename' => "source-{$index}.txt",
+            'filename' => "source-{$index}.txt",
             'file_disk' => 'local',
             'file_path' => "input-sources/source-{$index}.txt",
             'mime_type' => 'text/plain',
@@ -99,7 +131,7 @@ test('txt uploads create an input source and queue analysis', function () {
 
     expect($source)
         ->title->toBe('meeting')
-        ->original_filename->toBe('meeting.txt')
+        ->filename->toBe('meeting.txt')
         ->file_disk->toBe('local')
         ->file_path->toStartWith('input-sources/')
         ->mime_type->not->toBeNull()
@@ -128,7 +160,7 @@ test('md uploads create an input source and queue analysis', function () {
 
     expect($source)
         ->title->toBe('Imported plan')
-        ->original_filename->toBe('plan.md')
+        ->filename->toBe('plan.md')
         ->file_disk->toBe('local')
         ->file_path->toStartWith('input-sources/')
         ->mime_type->not->toBeNull()
@@ -156,7 +188,7 @@ test('pdf uploads store the file and queue analysis without extracted text', fun
 
     expect($source)
         ->title->toBe('roadmap')
-        ->original_filename->toBe('roadmap.pdf')
+        ->filename->toBe('roadmap.pdf')
         ->file_disk->toBe('local')
         ->file_path->toStartWith('input-sources/')
         ->mime_type->not->toBeNull()
@@ -194,7 +226,7 @@ test('preview route streams stored files inline', function () {
 
     $source = InputSource::create([
         'title' => 'Example',
-        'original_filename' => 'example.txt',
+        'filename' => 'example.txt',
         'file_disk' => 'local',
         'file_path' => $path,
         'mime_type' => 'text/plain',
@@ -216,7 +248,7 @@ test('preview route fails safely when stored file is missing', function () {
 
     $source = InputSource::create([
         'title' => 'Missing',
-        'original_filename' => 'missing.pdf',
+        'filename' => 'missing.pdf',
         'file_disk' => 'local',
         'file_path' => 'input-sources/missing.pdf',
         'mime_type' => 'application/pdf',
@@ -233,7 +265,7 @@ test('codex analysis prompt includes stored file path metadata for file backed s
 
     $inputSource = new InputSource([
         'title' => 'Roadmap PDF',
-        'original_filename' => 'roadmap.pdf',
+        'filename' => 'roadmap.pdf',
         'file_disk' => 'local',
         'file_path' => 'input-sources/roadmap.pdf',
         'mime_type' => 'application/pdf',
@@ -245,7 +277,7 @@ test('codex analysis prompt includes stored file path metadata for file backed s
 
     expect($payload)
         ->toContain('Input source kind: stored uploaded file')
-        ->toContain('Original filename: roadmap.pdf')
+        ->toContain('Filename: roadmap.pdf')
         ->toContain('MIME type: application/pdf')
         ->toContain('File size: 8 bytes')
         ->toContain(Storage::disk('local')->path('input-sources/roadmap.pdf'))

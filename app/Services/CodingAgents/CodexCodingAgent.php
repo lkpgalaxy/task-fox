@@ -182,14 +182,14 @@ PROMPT;
     {
         if ($inputSource->hasStoredFile()) {
             $absolutePath = Storage::disk((string) $inputSource->file_disk)->path((string) $inputSource->file_path);
-            $filename = $inputSource->original_filename ?: basename((string) $inputSource->file_path);
+            $filename = $inputSource->filename ?: basename((string) $inputSource->file_path);
             $mimeType = $inputSource->mime_type ?: 'unknown';
             $fileSize = $inputSource->file_size !== null ? "{$inputSource->file_size} bytes" : 'unknown';
 
             return <<<PAYLOAD
 Input source title: {$inputSource->title}
 Input source kind: stored uploaded file
-Original filename: {$filename}
+Filename: {$filename}
 MIME type: {$mimeType}
 File size: {$fileSize}
 Stored absolute file path: {$absolutePath}

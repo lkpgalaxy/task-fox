@@ -11,14 +11,6 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('input_sources', function (Blueprint $table): void {
-            $table->foreignId('project_id')
-                ->nullable()
-                ->after('analysis_result')
-                ->constrained('projects')
-                ->nullOnDelete();
-        });
-
         Schema::table('tasks', function (Blueprint $table): void {
             $table->foreignId('project_id')
                 ->nullable()
@@ -49,11 +41,6 @@ return new class extends Migration
         });
 
         Schema::table('tasks', function (Blueprint $table): void {
-            $table->dropForeignIdFor('project_id');
-            $table->dropColumn('project_id');
-        });
-
-        Schema::table('input_sources', function (Blueprint $table): void {
             $table->dropForeignIdFor('project_id');
             $table->dropColumn('project_id');
         });

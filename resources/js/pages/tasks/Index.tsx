@@ -1,4 +1,4 @@
-import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
+import { Head, router, useForm, usePage } from '@inertiajs/react';
 import { useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { AppShell } from '@/components/app-shell';
@@ -14,10 +14,13 @@ import {
     Select,
     Textarea,
 } from '@/components/ui';
+import { UploadSourceModal } from '@/components/upload-source-modal';
+import type {
+    UploadSourceFormData,
+    UploadSourceType,
+} from '@/components/upload-source-modal';
 import { cn } from '@/lib/utils';
 import inputSources from '@/routes/input-sources';
-import logs from '@/routes/logs';
-import projects from '@/routes/projects';
 import tasks from '@/routes/tasks';
 
 type Criterion = {
@@ -34,7 +37,7 @@ type User = {
 type SourceInput = {
     id: number;
     title: string;
-    original_filename?: string | null;
+    filename?: string | null;
     mime_type?: string | null;
     file_size?: number | null;
     analysis_status: string;
@@ -153,8 +156,6 @@ type TaskFormData = {
     acceptance_criteria: Criterion[];
 };
 
-type ImportSourceType = 'text' | 'file';
-
 const emptyCriterion = (): Criterion => ({ body: '', checked: false });
 
 const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
@@ -179,22 +180,6 @@ const sanitizeCriteria = (criteria: Criterion[]): Criterion[] => {
     return next.length > 0
         ? next
         : [{ ...emptyCriterion(), body: 'No acceptance criteria provided.' }];
-};
-
-const formatFileSize = (size: number | null): string => {
-    if (size === null) {
-        return 'Unknown size';
-    }
-
-    if (size < 1024) {
-        return `${size} B`;
-    }
-
-    if (size < 1024 * 1024) {
-        return `${(size / 1024).toFixed(1)} KB`;
-    }
-
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 const formatDate = (value: string | null): string => {
@@ -254,12 +239,7 @@ export default function TasksIndex() {
         acceptance_criteria: [emptyCriterion()],
     });
 
-    const analyzeForm = useForm<{
-        title: string;
-        source_type: ImportSourceType;
-        text: string;
-        upload: File | null;
-    }>({
+    const analyzeForm = useForm<UploadSourceFormData>({
         title: '',
         source_type: 'text',
         text: '',
@@ -314,7 +294,7 @@ export default function TasksIndex() {
         analyzeForm.clearErrors();
     };
 
-    const updateImportSourceType = (sourceType: ImportSourceType) => {
+    const updateImportSourceType = (sourceType: UploadSourceType) => {
         analyzeForm.setData({
             ...analyzeForm.data,
             source_type: sourceType,
@@ -508,24 +488,6 @@ export default function TasksIndex() {
             showHeaderText={false}
             actions={
                 <>
-                    <Link
-                        href={projects.index.url()}
-                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
-                    >
-                        Projects
-                    </Link>
-                    <Link
-                        href={inputSources.index.url()}
-                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
-                    >
-                        Sources
-                    </Link>
-                    <Link
-                        href={logs.index.url()}
-                        className="inline-flex min-h-9 items-center rounded-md border border-hairline-strong bg-surface-2 px-3 py-2 text-sm font-medium text-ink hover:bg-surface-3"
-                    >
-                        Logs
-                    </Link>
                     <Button
                         type="button"
                         variant="secondary"
@@ -550,36 +512,6 @@ export default function TasksIndex() {
                 {errors?.status ? (
                     <Alert tone="danger">{formatError(errors.status)}</Alert>
                 ) : null}
-
-                <Panel className="p-3">
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                        {sourceInputs.slice(0, 4).map((sourceInput) => (
-                            <div
-                                key={sourceInput.id}
-                                className="min-w-0 rounded-md border border-hairline bg-surface-2 p-3"
-                            >
-                                <div className="flex items-center justify-between gap-2">
-                                    <p className="truncate text-sm font-medium text-ink">
-                                        {sourceInput.title}
-                                    </p>
-                                    <Badge value={sourceInput.analysis_status}>
-                                        {sourceInput.analysis_status}
-                                    </Badge>
-                                </div>
-                                <p className="mt-1 truncate text-xs text-ink-subtle">
-                                    {sourceInput.original_filename
-                                        ? `${sourceInput.original_filename} · ${sourceInput.mime_type ?? 'unknown type'} · ${formatFileSize(sourceInput.file_size ?? null)}`
-                                        : 'Pasted text'}
-                                </p>
-                            </div>
-                        ))}
-                        {sourceInputs.length === 0 ? (
-                            <p className="px-1 py-2 text-sm text-ink-subtle">
-                                No input sources yet.
-                            </p>
-                        ) : null}
-                    </div>
-                </Panel>
 
                 <section className="grid min-h-[640px] auto-cols-[minmax(340px,420px)] grid-flow-col gap-3 overflow-x-auto pb-2">
                     {taskStatuses.map((status) => {
@@ -691,8 +623,9 @@ export default function TasksIndex() {
                 />
             </TaskEditorModal>
 
-            <ImportSourceModal
+            <UploadSourceModal
                 show={showImportModal}
+                title="Import input source"
                 form={analyzeForm}
                 onClose={closeImportModal}
                 onSubmit={submitImport}
@@ -738,21 +671,16 @@ function TaskCard({
                     : 'border-hairline',
             )}
         >
-            <div className="flex items-start justify-between gap-2">
-                <p className="min-w-0 text-sm leading-5 font-medium text-ink">
-                    {task.title}
-                </p>
-                <Badge value={task.status}>
-                    {taskStatusLabel(task.status)}
-                </Badge>
-            </div>
+            <p className="min-w-0 text-sm leading-5 font-medium text-ink">
+                {task.title}
+            </p>
             <p className="mt-2 line-clamp-2 text-xs leading-5 text-ink-subtle">
                 {task.description || 'No description'}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-tertiary">
                 <span>#{task.id}</span>
                 <span>{taskPriorityLabel(task.priority)}</span>
-                {task.project ? <span>{task.project.name}</span> : null}
+                {task.project ? <Badge>{task.project.name}</Badge> : null}
                 {task.latest_ai_run ? (
                     <Badge value={task.latest_ai_run.status}>
                         run {taskStatusLabel(task.latest_ai_run.status)}
@@ -1215,148 +1143,6 @@ function TaskFormFields({
                 ) : null}
             </div>
         </div>
-    );
-}
-
-function ImportSourceModal({
-    show,
-    form,
-    onClose,
-    onSubmit,
-    onSourceTypeChange,
-}: {
-    show: boolean;
-    form: ReturnType<
-        typeof useForm<{
-            title: string;
-            source_type: ImportSourceType;
-            text: string;
-            upload: File | null;
-        }>
-    >;
-    onClose: () => void;
-    onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-    onSourceTypeChange: (sourceType: ImportSourceType) => void;
-}) {
-    return (
-        <Modal show={show} onClose={onClose} title="Import input source">
-            <form onSubmit={onSubmit} className="space-y-4">
-                <Field label="Title (optional)">
-                    <Input
-                        type="text"
-                        value={form.data.title}
-                        onChange={(event) =>
-                            form.setData('title', event.target.value)
-                        }
-                    />
-                </Field>
-
-                <fieldset className="space-y-2">
-                    <legend className="text-sm font-medium text-ink-muted">
-                        Input source
-                    </legend>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                        {(['text', 'file'] as ImportSourceType[]).map(
-                            (sourceType) => (
-                                <label
-                                    key={sourceType}
-                                    className={cn(
-                                        'flex cursor-pointer items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm transition',
-                                        form.data.source_type === sourceType
-                                            ? 'border-primary bg-primary/15 text-ink'
-                                            : 'border-hairline bg-surface-2 text-ink-muted hover:bg-surface-3',
-                                    )}
-                                >
-                                    <input
-                                        type="radio"
-                                        name="source_type"
-                                        value={sourceType}
-                                        checked={
-                                            form.data.source_type === sourceType
-                                        }
-                                        onChange={() =>
-                                            onSourceTypeChange(sourceType)
-                                        }
-                                        className="sr-only"
-                                    />
-                                    <span className="font-semibold">
-                                        {sourceType === 'text'
-                                            ? 'Paste text'
-                                            : 'Upload file'}
-                                    </span>
-                                    <span className="text-xs text-ink-subtle">
-                                        {sourceType === 'text'
-                                            ? 'Manual input'
-                                            : '.txt, .md, or .pdf'}
-                                    </span>
-                                </label>
-                            ),
-                        )}
-                    </div>
-                </fieldset>
-
-                {form.data.source_type === 'text' ? (
-                    <Field label="Text">
-                        <Textarea
-                            value={form.data.text}
-                            onChange={(event) =>
-                                form.setData('text', event.target.value)
-                            }
-                            rows={8}
-                            placeholder="Paste the source text to analyze into tasks..."
-                        />
-                    </Field>
-                ) : (
-                    <div className="grid gap-2 text-sm text-ink-muted">
-                        <span>File</span>
-                        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-hairline-strong bg-surface-2 px-4 py-6 text-center transition hover:border-primary/60">
-                            <span className="rounded-md border border-primary bg-primary px-3 py-2 text-sm font-semibold text-white">
-                                Choose file
-                            </span>
-                            <span className="text-xs text-ink-subtle">
-                                {form.data.upload?.name ??
-                                    'Upload a .txt, .md, or .pdf file up to 10 MB'}
-                            </span>
-                            <input
-                                type="file"
-                                accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf"
-                                onChange={(event) =>
-                                    form.setData(
-                                        'upload',
-                                        event.currentTarget.files?.[0] ?? null,
-                                    )
-                                }
-                                className="sr-only"
-                            />
-                        </label>
-                    </div>
-                )}
-
-                {formatError(form.errors.text) ? (
-                    <p className="text-xs text-red-200">
-                        {formatError(form.errors.text)}
-                    </p>
-                ) : null}
-                {formatError(form.errors.upload) ? (
-                    <p className="text-xs text-red-200">
-                        {formatError(form.errors.upload)}
-                    </p>
-                ) : null}
-
-                <div className="flex justify-end gap-2">
-                    <Button type="button" variant="ghost" onClick={onClose}>
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        variant="primary"
-                        disabled={form.processing}
-                    >
-                        {form.processing ? 'Submitting...' : 'Analyze'}
-                    </Button>
-                </div>
-            </form>
-        </Modal>
     );
 }
 

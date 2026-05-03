@@ -31,14 +31,6 @@ class Project extends Model
     }
 
     /**
-     * @return HasMany<int, InputSource>
-     */
-    public function inputSources(): HasMany
-    {
-        return $this->hasMany(InputSource::class);
-    }
-
-    /**
      * @return HasMany<int, Task>
      */
     public function tasks(): HasMany

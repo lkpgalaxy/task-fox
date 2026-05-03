@@ -77,11 +77,11 @@ class TaskController extends Controller
             'sourceInputs' => InputSource::query()
                 ->whereDate('created_at', today())
                 ->orderByDesc('created_at')
-                ->get(['id', 'title', 'original_filename', 'file_path', 'mime_type', 'file_size', 'analysis_status'])
+                ->get(['id', 'title', 'filename', 'file_path', 'mime_type', 'file_size', 'analysis_status'])
                 ->map(fn (InputSource $inputSource): array => [
                     'id' => $inputSource->id,
                     'title' => $inputSource->title,
-                    'original_filename' => $inputSource->original_filename,
+                    'filename' => $inputSource->filename,
                     'mime_type' => $inputSource->mime_type,
                     'file_size' => $inputSource->file_size,
                     'analysis_status' => $inputSource->analysis_status,

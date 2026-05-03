@@ -7,7 +7,6 @@ use App\Jobs\AnalyzeInputSourceJob;
 use App\Models\InputSource;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -21,7 +20,7 @@ class InputSourceController extends Controller
             ->select([
                 'id',
                 'title',
-                'original_filename',
+                'filename',
                 'file_disk',
                 'file_path',
                 'mime_type',
@@ -38,7 +37,7 @@ class InputSourceController extends Controller
             ->through(fn (InputSource $inputSource): array => [
                 'id' => $inputSource->id,
                 'title' => $inputSource->title,
-                'original_filename' => $inputSource->original_filename,
+                'filename' => $inputSource->filename,
                 'mime_type' => $inputSource->mime_type,
                 'file_size' => $inputSource->file_size,
                 'analysis_status' => $inputSource->analysis_status,
@@ -74,7 +73,7 @@ class InputSourceController extends Controller
     {
         $title = $request->string('title')->trim()->toString();
         $sourceType = $request->string('source_type')->toString();
-        $originalFilename = null;
+        $filename = null;
         $fileDisk = null;
         $filePath = null;
         $mimeType = null;
@@ -89,7 +88,7 @@ class InputSourceController extends Controller
                 ]);
             }
 
-            $originalFilename = $upload->getClientOriginalName();
+            $filename = $upload->getClientOriginalName();
             $fileDisk = 'local';
             $filePath = $upload->store('input-sources', $fileDisk);
 
@@ -111,7 +110,8 @@ class InputSourceController extends Controller
             }
 
             $fileDisk = 'local';
-            $filePath = 'input-sources/'.Str::uuid().'.txt';
+            $filename = 'input-source-'.now()->format('Ymd-His').'.txt';
+            $filePath = "input-sources/{$filename}";
 
             if (! Storage::disk($fileDisk)->put($filePath, $text)) {
                 throw ValidationException::withMessages([
@@ -124,13 +124,13 @@ class InputSourceController extends Controller
         }
 
         if ($title === '') {
-            $filename = $originalFilename !== null ? pathinfo($originalFilename, PATHINFO_FILENAME) : null;
-            $title = $filename !== null && $filename !== '' ? $filename : now()->format('H:i d/m/Y');
+            $titleStem = $filename !== null ? pathinfo($filename, PATHINFO_FILENAME) : null;
+            $title = $titleStem !== null && $titleStem !== '' ? $titleStem : now()->format('H:i d/m/Y');
         }
 
         $source = InputSource::create([
             'title' => $title,
-            'original_filename' => $originalFilename,
+            'filename' => $filename,
             'file_disk' => $fileDisk,
             'file_path' => $filePath,
             'mime_type' => $mimeType,
@@ -165,7 +165,7 @@ class InputSourceController extends Controller
 
         $response->setContentDisposition(
             'inline',
-            $inputSource->original_filename ?: basename((string) $inputSource->file_path),
+            $inputSource->filename ?: basename((string) $inputSource->file_path),
         );
 
         return $response;
