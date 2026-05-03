@@ -37,6 +37,7 @@ This project has domain-specific skills available in `**/skills/**`. You MUST ac
 - You must follow all existing code conventions used in this application. When creating or editing a file, check sibling files for the correct structure, approach, and naming.
 - Use descriptive names for variables and methods. For example, `isRegisteredForDiscounts`, not `discount()`.
 - Check for existing components to reuse before writing a new one.
+- When implementing UI, you must follow the design direction, patterns, and constraints defined in `DESIGN.md`.
 
 ## Verification Scripts
 
