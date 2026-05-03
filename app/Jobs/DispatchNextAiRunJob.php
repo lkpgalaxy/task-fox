@@ -7,7 +7,7 @@ use App\Models\Task;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Foundation\Queue\SerializesModels;
+use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 
 class DispatchNextAiRunJob implements ShouldQueue

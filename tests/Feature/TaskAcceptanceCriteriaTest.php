@@ -7,7 +7,9 @@ use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use App\Services\PullRequests\GithubPullRequestProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
+use Inertia\Testing\AssertableInertia as Assert;
 
 uses(RefreshDatabase::class);
 
@@ -162,6 +164,8 @@ test('codex agent prompt renders acceptance criteria from the task json column',
 });
 
 test('task index loads latest ai run without ambiguous columns', function () {
+    $this->withoutVite();
+
     $task = Task::create([
         'title' => 'Review implementation',
         'description' => 'Confirm the latest run can be displayed.',
@@ -177,4 +181,86 @@ test('task index loads latest ai run without ambiguous columns', function () {
     ]);
 
     $this->get(route('tasks.index'))->assertOk();
+});
+
+test('task index only lists input sources created today', function () {
+    $this->withoutVite();
+
+    $todaySource = InputSource::create([
+        'title' => 'Today source',
+        'file_disk' => 'local',
+        'file_path' => 'input-sources/today.txt',
+        'mime_type' => 'text/plain',
+        'file_size' => 100,
+        'analysis_status' => 'completed',
+    ]);
+
+    $olderSource = InputSource::create([
+        'title' => 'Older source',
+        'file_disk' => 'local',
+        'file_path' => 'input-sources/older.txt',
+        'mime_type' => 'text/plain',
+        'file_size' => 100,
+        'analysis_status' => 'completed',
+    ]);
+    $olderSource->forceFill([
+        'created_at' => now()->subDay(),
+        'updated_at' => now()->subDay(),
+    ])->save();
+
+    $this->get(route('tasks.index'))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('tasks/Index')
+            ->has('sourceInputs', 1)
+            ->where('sourceInputs.0.id', $todaySource->id)
+            ->where('sourceInputs.0.title', 'Today source')
+        );
+});
+
+test('task index can select a pending approval task without external messages', function () {
+    $this->withoutVite();
+
+    $task = Task::create([
+        'title' => 'Needs approval',
+        'description' => 'Open the detail panel.',
+        'acceptance_criteria' => [
+            ['body' => 'The task details can be opened.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_PENDING_APPROVAL,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $this->get(route('tasks.index', ['task' => $task->id]))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('tasks/Index')
+            ->where('selectedTask.id', $task->id)
+            ->where('selectedTask.status', Task::STATUS_PENDING_APPROVAL)
+            ->where('selectedTask.external_messages', [])
+        );
+});
+
+test('pending approval task can be approved from the task board', function () {
+    Queue::fake();
+    User::factory()->create();
+
+    $task = Task::create([
+        'title' => 'Approve me',
+        'description' => 'This task should approve without a server error.',
+        'acceptance_criteria' => [
+            ['body' => 'The approval route redirects successfully.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_PENDING_APPROVAL,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $response = $this->post(route('tasks.approve', $task));
+
+    $response->assertRedirect(route('tasks.index'));
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_APPROVED)
+        ->approved_by_user_id->not->toBeNull()
+        ->approved_at->not->toBeNull();
 });

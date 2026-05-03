@@ -9,7 +9,6 @@ use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Jobs\DispatchNextAiRunJob;
 use App\Models\AiRun;
-use App\Models\AiRunLog;
 use App\Models\InputSource;
 use App\Models\Task;
 use App\Models\User;
@@ -73,6 +72,7 @@ class TaskController extends Controller
             'tasks' => $tasks,
             'users' => User::query()->orderBy('name')->get(['id', 'name', 'github_username']),
             'sourceInputs' => InputSource::query()
+                ->whereDate('created_at', today())
                 ->orderByDesc('created_at')
                 ->get(['id', 'title', 'original_filename', 'file_path', 'mime_type', 'file_size', 'analysis_status'])
                 ->map(fn (InputSource $inputSource): array => [
@@ -101,25 +101,6 @@ class TaskController extends Controller
                 Task::PRIORITY_HIGH,
                 Task::PRIORITY_URGENT,
             ],
-            'globalLogs' => AiRunLog::query()
-                ->with([
-                    'aiRun:id,status,task_id',
-                    'inputSource:id,title,analysis_status',
-                ])
-                ->latest('created_at')
-                ->limit(80)
-                ->get()
-                ->map(fn (AiRunLog $log) => [
-                    'id' => $log->id,
-                    'level' => $log->level,
-                    'message' => $log->message,
-                    'context' => $log->context,
-                    'created_at' => $log->created_at?->toIso8601String(),
-                    'task_id' => optional($log->aiRun?->task_id),
-                    'run_status' => $log->aiRun?->status,
-                    'input_source_id' => $log->input_source_id,
-                    'input_source_title' => $log->inputSource?->title,
-                ]),
         ]);
     }
 
@@ -408,9 +389,8 @@ class TaskController extends Controller
             ],
         )->values();
 
-        $result['external_messages'] = optional($task->externalTaskLink)
-            ?->messages
-            ->map(
+        $result['external_messages'] = $task->externalTaskLink?->messages
+            ?->map(
                 fn ($message) => $message->only([
                     'id',
                     'type',
@@ -420,7 +400,7 @@ class TaskController extends Controller
                     'payload',
                 ]),
             )
-            ->values();
+            ->values() ?? collect();
 
         return $result;
     }
