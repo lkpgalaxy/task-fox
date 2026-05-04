@@ -1,4 +1,4 @@
 [mcp_servers.laravel-boost]
 command = "php"
 args = ["artisan", "boost:mcp"]
-cwd = "/home/lkp/Workspace/SideProjects/task-fox"
+cwd = "/home/lkp/Workspace/side-projects/task-fox"
