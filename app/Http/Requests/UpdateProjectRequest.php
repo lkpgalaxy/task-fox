@@ -5,6 +5,7 @@ namespace App\Http\Requests;
 use App\Models\Project;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class UpdateProjectRequest extends FormRequest
 {
@@ -33,6 +34,11 @@ class UpdateProjectRequest extends FormRequest
             'credential_username' => ['nullable', 'string', 'max:255'],
             'credential_password' => ['nullable', 'string'],
             'base_branch' => ['nullable', 'string', 'max:120'],
+            'default_reviewer_user_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('users', 'id'),
+            ],
         ];
     }
 

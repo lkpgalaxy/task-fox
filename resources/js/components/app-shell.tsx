@@ -1,10 +1,14 @@
 import { Link, usePage } from '@inertiajs/react';
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { logout } from '@/routes';
 import inputSources from '@/routes/input-sources';
 import logs from '@/routes/logs';
+import profile from '@/routes/profile';
 import projects from '@/routes/projects';
 import tasks from '@/routes/tasks';
+import users from '@/routes/users';
+import type { Auth } from '@/types';
 
 const navigation = [
     { label: 'Tasks', href: tasks.index.url(), match: '/tasks' },
@@ -32,8 +36,16 @@ export function AppShell({
     width?: 'wide' | 'full';
     showHeaderText?: boolean;
 }) {
-    const { url } = usePage();
+    const { url, props } = usePage<{ auth: Auth }>();
     const pathname = url.split('?')[0] ?? url;
+    const authUser = props.auth.user;
+    const visibleNavigation =
+        authUser?.role === 'admin'
+            ? [
+                  ...navigation,
+                  { label: 'Users', href: users.index.url(), match: '/users' },
+              ]
+            : navigation;
 
     return (
         <div className="min-h-screen bg-canvas text-ink">
@@ -49,7 +61,7 @@ export function AppShell({
                         <span>Task Fox</span>
                     </Link>
                     <nav className="flex min-w-0 flex-1 items-center justify-center gap-1 overflow-x-auto">
-                        {navigation.map((item) => {
+                        {visibleNavigation.map((item) => {
                             const isActive = pathname.startsWith(item.match);
 
                             return (
@@ -69,6 +81,24 @@ export function AppShell({
                             );
                         })}
                     </nav>
+                    {authUser ? (
+                        <div className="flex shrink-0 items-center gap-2">
+                            <Link
+                                href={profile.edit.url()}
+                                className="hidden max-w-44 truncate rounded-md px-3 py-1.5 text-sm font-medium text-ink-subtle transition hover:bg-surface-2 hover:text-ink sm:block"
+                            >
+                                {authUser.name}
+                            </Link>
+                            <Link
+                                href={logout.url()}
+                                method="post"
+                                as="button"
+                                className="rounded-md border border-hairline-strong bg-surface-2 px-3 py-1.5 text-sm font-medium text-ink transition hover:bg-surface-3"
+                            >
+                                Logout
+                            </Link>
+                        </div>
+                    ) : null}
                 </div>
             </header>
 

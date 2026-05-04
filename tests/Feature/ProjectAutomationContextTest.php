@@ -1,5 +1,11 @@
 <?php
 
+use App\Contracts\CodingAgent;
+use App\Contracts\ExternalTaskProvider;
+use App\Contracts\PullRequestProvider;
+use App\DataTransferObjects\CodingAgentResult;
+use App\DataTransferObjects\PullRequestResult;
+use App\Enums\PullRequestReviewState;
 use App\Jobs\DispatchNextAiRunJob;
 use App\Jobs\RunApprovedTaskWithCodingAgentJob;
 use App\Models\AiRun;
@@ -9,8 +15,14 @@ use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Mockery\MockInterface;
+use Symfony\Component\Process\Process;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function (): void {
+    $this->actingAs(User::factory()->create());
+});
 
 test('manual tasks can be created without a project', function () {
     $this->post(route('tasks.store'), [
@@ -88,6 +100,77 @@ test('reject can change task status without a project', function () {
         ->project_id->toBeNull()
         ->status->toBe(Task::STATUS_REJECTED)
         ->rejected_at->not->toBeNull();
+});
+
+test('failed tasks can be retried and queued for execution', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+        'url' => 'https://github.com/example/task-fox',
+        'base_branch' => 'develop',
+    ]);
+    $task = Task::create([
+        'title' => 'Retry failed run',
+        'description' => 'A failed task should be eligible for another run.',
+        'acceptance_criteria' => [
+            ['body' => 'Retry schedules another AI run.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+        'pull_request_url' => 'https://github.com/example/task-fox/pull/10',
+        'pull_request_number' => 10,
+    ]);
+
+    $this->post(route('tasks.retry', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Task queued for retry.');
+
+    $task->refresh();
+
+    expect($task)
+        ->status->toBe(Task::STATUS_APPROVED)
+        ->approved_by_user_id->toBe(auth()->id())
+        ->approved_at->not->toBeNull()
+        ->pull_request_url->toBeNull()
+        ->pull_request_number->toBeNull();
+
+    Queue::assertPushed(
+        DispatchNextAiRunJob::class,
+        fn (DispatchNextAiRunJob $job): bool => $job->taskId === $task->id,
+    );
+});
+
+test('only failed tasks can be retried', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+        'url' => 'https://github.com/example/task-fox',
+    ]);
+    $task = Task::create([
+        'title' => 'Already pending',
+        'description' => 'Retry should be limited to failed tasks.',
+        'acceptance_criteria' => [
+            ['body' => 'Non-failed task is not queued.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_PENDING_APPROVAL,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+
+    $this->post(route('tasks.retry', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'status' => 'Only failed tasks can be retried.',
+        ]);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_PENDING_APPROVAL);
+
+    Queue::assertNotPushed(DispatchNextAiRunJob::class);
 });
 
 test('ai run creation snapshots project workspace path and base branch', function () {
@@ -192,3 +275,286 @@ test('codex coding agent uses the run workspace as codex workspace and process c
         ->and($args)->toContain('-C')
         ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath);
 });
+
+test('pull request review is requested from the project default reviewer before the task assignee', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $assignee = User::factory()->create(['github_username' => 'assignee-login']);
+    $defaultReviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+    $project = Project::create([
+        'name' => 'Review Project',
+        'workspace_path' => $repositoryPath,
+        'default_reviewer_user_id' => $defaultReviewer->id,
+    ]);
+    $task = Task::create([
+        'title' => 'Open reviewed PR',
+        'description' => 'Default reviewer should be requested.',
+        'acceptance_criteria' => [
+            ['body' => 'Default reviewer receives the review request.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'assignee_user_id' => $assignee->id,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => 'task/default-reviewer',
+        'repository_path' => $repositoryPath,
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+
+    bindSuccessfulRunMocks($defaultReviewer);
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_PR_CREATED)
+        ->pull_request_url->toBe('https://github.com/example/repo/pull/123');
+
+    Queue::assertPushed(DispatchNextAiRunJob::class);
+});
+
+test('pull request review falls back to the task assignee when no default reviewer is configured', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $assignee = User::factory()->create(['github_username' => 'assignee-login']);
+    $project = Project::create([
+        'name' => 'Review Project',
+        'workspace_path' => $repositoryPath,
+    ]);
+    $task = Task::create([
+        'title' => 'Open reviewed PR',
+        'description' => 'Assignee should be requested.',
+        'acceptance_criteria' => [
+            ['body' => 'Assignee receives the review request.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'assignee_user_id' => $assignee->id,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => 'task/assignee-reviewer',
+        'repository_path' => $repositoryPath,
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+
+    bindSuccessfulRunMocks($assignee);
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED);
+});
+
+test('pull request review uses task reviewer before project default reviewer', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $taskReviewer = User::factory()->create(['github_username' => 'task-reviewer']);
+    $defaultReviewer = User::factory()->create(['github_username' => 'project-reviewer']);
+    $project = Project::create([
+        'name' => 'Review Project',
+        'workspace_path' => $repositoryPath,
+        'default_reviewer_user_id' => $defaultReviewer->id,
+    ]);
+    $task = Task::create([
+        'title' => 'Open reviewed PR',
+        'description' => 'Task reviewer should be requested.',
+        'acceptance_criteria' => [
+            ['body' => 'Task reviewer receives the review request.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'reviewer_user_id' => $taskReviewer->id,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => 'task/task-reviewer',
+        'repository_path' => $repositoryPath,
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+
+    bindSuccessfulRunMocks($taskReviewer);
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED);
+});
+
+test('failed task can create a pull request from the latest ai run branch', function () {
+    $assignee = User::factory()->create(['github_username' => 'assignee-login']);
+    $defaultReviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+    $project = Project::create([
+        'name' => 'Manual PR Project',
+        'workspace_path' => '/tmp/manual-pr',
+        'default_reviewer_user_id' => $defaultReviewer->id,
+    ]);
+    $task = Task::create([
+        'title' => 'Open manual PR',
+        'description' => 'A failed run can still have useful changes to open.',
+        'acceptance_criteria' => [
+            ['body' => 'Manual PR is created from the run branch.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'assignee_user_id' => $assignee->id,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'project_id' => $project->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => 'ai-task-1-open-manual-pr',
+        'repository_path' => '/tmp/manual-pr',
+        'workspace_path' => '/tmp/manual-pr',
+        'base_branch' => 'main',
+        'last_error' => 'Tests failed after retry limit reached.',
+    ]);
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($run, $defaultReviewer): void {
+            $mock->shouldReceive('createPullRequest')
+                ->once()
+                ->with(Mockery::type(Task::class), Mockery::on(fn (AiRun $givenRun): bool => $givenRun->is($run)))
+                ->andReturn(new PullRequestResult(
+                    url: 'https://github.com/example/repo/pull/456',
+                    number: 456,
+                ));
+            $mock->shouldReceive('requestReview')
+                ->once()
+                ->with(
+                    'https://github.com/example/repo/pull/456',
+                    Mockery::on(fn (User $user): bool => $user->is($defaultReviewer)),
+                );
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    $this->post(route('tasks.create-pr', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Pull request created.');
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_PR_CREATED)
+        ->pull_request_url->toBe('https://github.com/example/repo/pull/456')
+        ->pull_request_number->toBe(456)
+        ->and($run->refresh())
+        ->status->toBe(AiRun::STATUS_WAITING_FOR_MERGE)
+        ->pull_request_url->toBe('https://github.com/example/repo/pull/456')
+        ->pull_request_number->toBe(456)
+        ->last_error->toBeNull();
+});
+
+test('manual pull request creation requires a latest ai run branch', function () {
+    $task = Task::create([
+        'title' => 'Missing branch',
+        'description' => 'A branch is required to create a pull request.',
+        'acceptance_criteria' => [
+            ['body' => 'Manual PR is blocked without a branch.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => '',
+        'repository_path' => '',
+    ]);
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    $this->post(route('tasks.create-pr', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'pull_request' => 'The latest AI run does not have a branch to open.',
+        ]);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED);
+});
+
+function bindSuccessfulRunMocks(User $expectedReviewer): void
+{
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+        })
+    );
+
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($expectedReviewer): void {
+            $mock->shouldReceive('createPullRequest')
+                ->once()
+                ->andReturn(new PullRequestResult(
+                    url: 'https://github.com/example/repo/pull/123',
+                    number: 123,
+                ));
+            $mock->shouldReceive('requestReview')
+                ->once()
+                ->with(
+                    'https://github.com/example/repo/pull/123',
+                    Mockery::on(fn (User $user): bool => $user->is($expectedReviewer)),
+                );
+            $mock->shouldReceive('getReviewState')
+                ->never()
+                ->andReturn(PullRequestReviewState::UNKNOWN);
+        })
+    );
+}
+
+function createCleanGitRepository(): string
+{
+    $repositoryPath = sys_get_temp_dir().'/task-fox-review-repo-'.uniqid();
+
+    mkdir($repositoryPath);
+    runSuccessfulProcess(['git', 'init', '-b', 'main'], $repositoryPath);
+    runSuccessfulProcess(['git', 'config', 'user.email', 'tests@example.com'], $repositoryPath);
+    runSuccessfulProcess(['git', 'config', 'user.name', 'Task Fox Tests'], $repositoryPath);
+    file_put_contents($repositoryPath.'/README.md', "Review test\n");
+    runSuccessfulProcess(['git', 'add', 'README.md'], $repositoryPath);
+    runSuccessfulProcess(['git', 'commit', '-m', 'Initial commit'], $repositoryPath);
+
+    return $repositoryPath;
+}
+
+function runSuccessfulProcess(array $command, string $cwd): void
+{
+    $process = new Process($command, $cwd);
+    $process->run();
+
+    if (! $process->isSuccessful()) {
+        throw new RuntimeException($process->getErrorOutput());
+    }
+}

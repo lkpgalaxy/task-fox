@@ -1,9 +1,15 @@
 <?php
 
 use App\Models\Project;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Inertia\Testing\AssertableInertia as Assert;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function (): void {
+    $this->actingAs(User::factory()->create());
+});
 
 test('projects can be created with required fields', function () {
     $response = $this->post(route('projects.store'), [
@@ -23,6 +29,22 @@ test('projects can be created with required fields', function () {
         ->and($project->credential_username)->toBeNull()
         ->and($project->credential_password)->toBeNull()
         ->and($project->base_branch)->toBeNull();
+});
+
+test('projects can be created with a default reviewer', function () {
+    $reviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+
+    $response = $this->post(route('projects.store'), [
+        'name' => 'Core Platform',
+        'workspace_path' => '/tmp/core-platform',
+        'default_reviewer_user_id' => $reviewer->id,
+    ]);
+
+    $response->assertRedirect(route('projects.index'));
+
+    $project = Project::query()->sole();
+    expect($project->default_reviewer_user_id)->toBe($reviewer->id)
+        ->and($project->defaultReviewer->is($reviewer))->toBeTrue();
 });
 
 test('projects can be updated with optional credentials and base branch', function () {
@@ -57,6 +79,63 @@ test('projects can be updated with optional credentials and base branch', functi
         ->credential_username->toBe('repo_user')
         ->credential_password->toBe('repo_secret')
         ->base_branch->toBe('develop');
+});
+
+test('projects can be updated with a default reviewer', function () {
+    $reviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+    $project = Project::create([
+        'name' => 'Legacy Project',
+        'workspace_path' => '/tmp/legacy',
+    ]);
+
+    $response = $this->patch(route('projects.update', $project), [
+        'name' => 'Modern Platform',
+        'workspace_path' => '/tmp/modern',
+        'url' => null,
+        'database_name' => null,
+        'database_username' => null,
+        'database_password' => null,
+        'credential_username' => null,
+        'credential_password' => null,
+        'base_branch' => null,
+        'default_reviewer_user_id' => $reviewer->id,
+    ]);
+
+    $response->assertRedirect(route('projects.index'));
+
+    expect($project->refresh()->default_reviewer_user_id)->toBe($reviewer->id);
+});
+
+test('project index lists users without github usernames as reviewer options', function () {
+    $this->withoutVite();
+
+    $reviewer = User::factory()->create([
+        'name' => 'No GitHub Reviewer',
+        'github_username' => null,
+    ]);
+
+    $this->get(route('projects.index'))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('projects/Index')
+            ->where('reviewerOptions', fn ($options): bool => $options->contains(
+                fn (array $option): bool => $option['id'] === $reviewer->id
+                    && $option['name'] === 'No GitHub Reviewer'
+                    && $option['github_username'] === null
+            )));
+});
+
+test('projects can use a default reviewer without a github username', function () {
+    $reviewer = User::factory()->create(['github_username' => null]);
+
+    $this->from(route('projects.index'))->post(route('projects.store'), [
+        'name' => 'Core Platform',
+        'workspace_path' => '/tmp/core-platform',
+        'default_reviewer_user_id' => $reviewer->id,
+    ])->assertRedirect(route('projects.index'))
+        ->assertSessionHasNoErrors();
+
+    expect(Project::query()->sole()->default_reviewer_user_id)->toBe($reviewer->id);
 });
 
 test('blank password fields are preserved on project update', function () {

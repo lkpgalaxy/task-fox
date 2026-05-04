@@ -78,6 +78,7 @@ type TaskRecord = {
     deadline: string | null;
     project_id: number | null;
     assignee_user_id: number | null;
+    reviewer_user_id: number | null;
     source_input_id: number | null;
     approved_by_user_id: number | null;
     approved_at: string | null;
@@ -85,12 +86,14 @@ type TaskRecord = {
     pull_request_url: string | null;
     pull_request_number: number | null;
     assignee: TaskRelation | null;
+    reviewer: TaskRelation | null;
     approved_by_user: TaskRelation | null;
     project?: {
         id: number;
         name: string;
         workspace_path: string;
         url: string | null;
+        default_reviewer_user_id: number | null;
     } | null;
     source_input: SourceInput | null;
     acceptance_criteria: Criterion[];
@@ -123,6 +126,7 @@ type TaskRecord = {
 type ProjectSummary = {
     id: number;
     name: string;
+    default_reviewer_user_id: number | null;
 };
 
 type IndexPageProps = {
@@ -146,6 +150,7 @@ type TaskFormData = {
     priority: string;
     deadline: string;
     assignee_user_id: string;
+    reviewer_user_id: string;
     project_id: string;
     source_input_id: string;
     acceptance_criteria: Criterion[];
@@ -189,6 +194,21 @@ const formatDate = (value: string | null): string => {
     }
 };
 
+const defaultReviewerForProject = (
+    projects: ProjectSummary[],
+    projectId: string,
+): string => {
+    if (projectId === '') {
+        return '';
+    }
+
+    return (
+        projects
+            .find((project) => project.id.toString() === projectId)
+            ?.default_reviewer_user_id?.toString() ?? ''
+    );
+};
+
 export default function TasksIndex() {
     const page = usePage<IndexPageProps>();
     const {
@@ -218,6 +238,7 @@ export default function TasksIndex() {
         deadline: '',
         project_id: '',
         assignee_user_id: '',
+        reviewer_user_id: '',
         source_input_id: '',
         acceptance_criteria: [emptyCriterion()],
     });
@@ -229,6 +250,7 @@ export default function TasksIndex() {
         deadline: '',
         project_id: '',
         assignee_user_id: '',
+        reviewer_user_id: '',
         source_input_id: '',
         acceptance_criteria: [emptyCriterion()],
     });
@@ -255,6 +277,7 @@ export default function TasksIndex() {
             deadline: '',
             project_id: '',
             assignee_user_id: '',
+            reviewer_user_id: '',
             source_input_id: '',
             acceptance_criteria: [emptyCriterion()],
         });
@@ -266,6 +289,7 @@ export default function TasksIndex() {
             deadline: '',
             project_id: '',
             assignee_user_id: '',
+            reviewer_user_id: '',
             source_input_id: '',
             acceptance_criteria: [emptyCriterion()],
         });
@@ -303,6 +327,9 @@ export default function TasksIndex() {
             assignee_user_id: task.assignee_user_id
                 ? String(task.assignee_user_id)
                 : '',
+            reviewer_user_id: task.reviewer_user_id
+                ? String(task.reviewer_user_id)
+                : (task.project?.default_reviewer_user_id?.toString() ?? ''),
             source_input_id: task.source_input_id
                 ? String(task.source_input_id)
                 : '',
@@ -421,6 +448,28 @@ export default function TasksIndex() {
         );
     };
 
+    const submitRetry = (taskId: number) => {
+        router.post(
+            tasks.retry.url(taskId),
+            {},
+            {
+                preserveScroll: true,
+                onSuccess: () => openTaskDetails(taskId),
+            },
+        );
+    };
+
+    const submitCreatePr = (taskId: number) => {
+        router.post(
+            tasks.createPr.url(taskId),
+            {},
+            {
+                preserveScroll: true,
+                onSuccess: () => openTaskDetails(taskId),
+            },
+        );
+    };
+
     const submitRefreshPr = (taskId: number) => {
         router.post(
             tasks.refreshPr.url(taskId),
@@ -461,6 +510,11 @@ export default function TasksIndex() {
                 {flash?.status ? <Alert>{flash.status}</Alert> : null}
                 {errors?.status ? (
                     <Alert tone="danger">{formatError(errors.status)}</Alert>
+                ) : null}
+                {errors?.pull_request ? (
+                    <Alert tone="danger">
+                        {formatError(errors.pull_request)}
+                    </Alert>
                 ) : null}
 
                 <section className="grid min-h-[640px] auto-cols-[minmax(340px,420px)] grid-flow-col gap-3 overflow-x-auto pb-2">
@@ -584,6 +638,8 @@ export default function TasksIndex() {
                         onEdit={() => startEdit(selectedTask)}
                         onApprove={() => submitApprove(selectedTask.id)}
                         onReject={() => submitReject(selectedTask.id)}
+                        onRetry={() => submitRetry(selectedTask.id)}
+                        onCreatePr={() => submitCreatePr(selectedTask.id)}
                         onRefreshPr={() => submitRefreshPr(selectedTask.id)}
                     />
                 ) : null}
@@ -636,14 +692,25 @@ function TaskDetails({
     onEdit,
     onApprove,
     onReject,
+    onRetry,
+    onCreatePr,
     onRefreshPr,
 }: {
     task: TaskRecord;
     onEdit: () => void;
     onApprove: () => void;
     onReject: () => void;
+    onRetry: () => void;
+    onCreatePr: () => void;
     onRefreshPr: () => void;
 }) {
+    const canAttemptPrCreation =
+        !task.pull_request_url && task.latest_ai_run !== null;
+    const createPrDisabled =
+        task.latest_ai_run?.branch_name === null ||
+        task.latest_ai_run?.branch_name === undefined ||
+        task.latest_ai_run.branch_name === '';
+
     return (
         <div className="space-y-5">
             <div className="space-y-4 border-b border-hairline pb-5">
@@ -691,9 +758,39 @@ function TaskDetails({
                             Reject
                         </Button>
                     ) : null}
+                    {task.status === 'failed' ? (
+                        <Button
+                            type="button"
+                            variant="success"
+                            title={
+                                task.project_id === null
+                                    ? 'Assign a project before retrying this task.'
+                                    : undefined
+                            }
+                            disabled={task.project_id === null}
+                            onClick={onRetry}
+                        >
+                            Retry
+                        </Button>
+                    ) : null}
                     {task.pull_request_url ? (
                         <Button type="button" onClick={onRefreshPr}>
                             Refresh PR
+                        </Button>
+                    ) : null}
+                    {canAttemptPrCreation ? (
+                        <Button
+                            type="button"
+                            variant="success"
+                            title={
+                                createPrDisabled
+                                    ? 'The latest AI run does not have a branch to open.'
+                                    : undefined
+                            }
+                            disabled={createPrDisabled}
+                            onClick={onCreatePr}
+                        >
+                            Create PR
                         </Button>
                     ) : null}
                 </div>
@@ -705,6 +802,9 @@ function TaskDetails({
                 </DetailItem>
                 <DetailItem label="Assignee">
                     {task.assignee?.name ?? 'Unassigned'}
+                </DetailItem>
+                <DetailItem label="Reviewer">
+                    {task.reviewer?.name ?? 'No reviewer'}
                 </DetailItem>
                 <DetailItem label="Approved by">
                     {task.approved_by_user?.name ?? 'Not approved'}
@@ -901,8 +1001,8 @@ function TaskFormFields({
     form: {
         data: TaskFormData;
         setData: (
-            key: keyof TaskFormData,
-            value: TaskFormData[keyof TaskFormData],
+            keyOrData: keyof TaskFormData | TaskFormData,
+            value?: TaskFormData[keyof TaskFormData],
         ) => void;
         errors: Record<string, string | string[]>;
     };
@@ -914,6 +1014,27 @@ function TaskFormFields({
     onRemoveCriterion: (index: number) => void;
     onUpdateCriterion: (index: number, patch: Partial<Criterion>) => void;
 }) {
+    const changeProject = (projectId: string) => {
+        const currentProjectDefaultReviewer = defaultReviewerForProject(
+            projects,
+            form.data.project_id,
+        );
+        const nextProjectDefaultReviewer = defaultReviewerForProject(
+            projects,
+            projectId,
+        );
+
+        form.setData({
+            ...form.data,
+            project_id: projectId,
+            reviewer_user_id:
+                form.data.reviewer_user_id === '' ||
+                form.data.reviewer_user_id === currentProjectDefaultReviewer
+                    ? nextProjectDefaultReviewer
+                    : form.data.reviewer_user_id,
+        });
+    };
+
     return (
         <div className="space-y-4">
             <Field label="Title" error={formatError(form.errors.title)}>
@@ -990,9 +1111,7 @@ function TaskFormFields({
                 >
                     <Select
                         value={form.data.project_id}
-                        onChange={(event) =>
-                            form.setData('project_id', event.target.value)
-                        }
+                        onChange={(event) => changeProject(event.target.value)}
                     >
                         <option value="">No project</option>
                         {projects.map((project) => (
@@ -1003,6 +1122,28 @@ function TaskFormFields({
                     </Select>
                 </Field>
             </div>
+
+            <Field
+                label="Reviewer"
+                error={formatError(form.errors.reviewer_user_id)}
+            >
+                <Select
+                    value={form.data.reviewer_user_id}
+                    onChange={(event) =>
+                        form.setData('reviewer_user_id', event.target.value)
+                    }
+                >
+                    <option value="">No reviewer</option>
+                    {users.map((user) => (
+                        <option key={user.id} value={user.id}>
+                            {user.name}
+                            {user.github_username
+                                ? ` (@${user.github_username})`
+                                : ''}
+                        </option>
+                    ))}
+                </Select>
+            </Field>
 
             <Field
                 label="Source input"

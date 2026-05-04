@@ -2,6 +2,7 @@
 
 use App\Jobs\AnalyzeInputSourceJob;
 use App\Models\InputSource;
+use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -11,6 +12,10 @@ use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function (): void {
+    $this->actingAs(User::factory()->create());
+});
 
 test('pasted text import creates an input source and queues analysis', function () {
     Queue::fake();

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreProjectRequest;
 use App\Http\Requests\UpdateProjectRequest;
 use App\Models\Project;
+use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -14,6 +15,7 @@ class ProjectController extends Controller
     public function index(): Response
     {
         $projects = Project::query()
+            ->with('defaultReviewer:id,name,github_username')
             ->orderBy('name')
             ->get()
             ->map(fn (Project $project): array => [
@@ -24,6 +26,12 @@ class ProjectController extends Controller
                 'database_name' => $project->database_name,
                 'database_username' => $project->database_username,
                 'base_branch' => $project->base_branch,
+                'default_reviewer_user_id' => $project->default_reviewer_user_id,
+                'default_reviewer' => $project->defaultReviewer ? [
+                    'id' => $project->defaultReviewer->id,
+                    'name' => $project->defaultReviewer->name,
+                    'github_username' => $project->defaultReviewer->github_username,
+                ] : null,
                 'has_database_password' => $project->database_password !== null && $project->database_password !== '',
                 'has_credential_password' => $project->credential_password !== null && $project->credential_password !== '',
                 'credential_username' => $project->credential_username,
@@ -32,6 +40,9 @@ class ProjectController extends Controller
 
         return Inertia::render('projects/Index', [
             'projects' => $projects,
+            'reviewerOptions' => User::query()
+                ->orderBy('name')
+                ->get(['id', 'name', 'github_username']),
         ]);
     }
 

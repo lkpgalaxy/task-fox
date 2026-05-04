@@ -14,6 +14,10 @@ use Inertia\Testing\AssertableInertia as Assert;
 
 uses(RefreshDatabase::class);
 
+beforeEach(function (): void {
+    $this->actingAs(User::factory()->create());
+});
+
 test('manual task creation stores acceptance criteria on the task', function () {
     $assignee = User::factory()->create(['github_username' => 'linh']);
     $source = InputSource::create([
@@ -72,6 +76,67 @@ test('updating acceptance criteria stores the new criteria on the task', functio
     expect($task->refresh()->acceptance_criteria)->toBe([
         ['body' => 'Updated criterion.', 'checked' => true],
     ]);
+});
+
+test('task creation defaults reviewer from selected project default reviewer', function () {
+    $reviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+    $project = Project::create([
+        'name' => 'Reviewed Project',
+        'workspace_path' => '/tmp/reviewed-project',
+        'default_reviewer_user_id' => $reviewer->id,
+    ]);
+
+    $this->post(route('tasks.store'), [
+        'title' => 'Default reviewer task',
+        'description' => 'Task should inherit the project reviewer.',
+        'priority' => Task::PRIORITY_MEDIUM,
+        'deadline' => null,
+        'assignee_user_id' => null,
+        'reviewer_user_id' => null,
+        'source_input_id' => null,
+        'project_id' => $project->id,
+        'acceptance_criteria' => [
+            ['body' => 'Reviewer is set from the project.', 'checked' => false],
+        ],
+    ])->assertRedirect(route('tasks.index'));
+
+    expect(Task::query()->sole()->reviewer_user_id)->toBe($reviewer->id);
+});
+
+test('task reviewer can be updated without resetting approval', function () {
+    $approver = User::factory()->create();
+    $reviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+    $task = Task::create([
+        'title' => 'Approved task',
+        'description' => 'Reviewer changes should not require reapproval.',
+        'acceptance_criteria' => [
+            ['body' => 'Reviewer can be assigned independently.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'approved_by_user_id' => $approver->id,
+        'approved_at' => now(),
+    ]);
+
+    $this->patch(route('tasks.update', $task), [
+        'title' => 'Approved task',
+        'description' => 'Reviewer changes should not require reapproval.',
+        'priority' => Task::PRIORITY_MEDIUM,
+        'deadline' => null,
+        'assignee_user_id' => null,
+        'reviewer_user_id' => $reviewer->id,
+        'source_input_id' => null,
+        'project_id' => null,
+        'acceptance_criteria' => [
+            ['body' => 'Reviewer can be assigned independently.', 'checked' => false],
+        ],
+    ])->assertRedirect(route('tasks.index', ['task' => $task->id]));
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_APPROVED)
+        ->reviewer_user_id->toBe($reviewer->id)
+        ->approved_by_user_id->toBe($approver->id)
+        ->approved_at->not->toBeNull();
 });
 
 test('editing acceptance criteria on an approved task resets approval', function () {
@@ -244,7 +309,7 @@ test('task index can select a pending approval task without external messages', 
 
 test('pending approval task can be approved from the task board', function () {
     Queue::fake();
-    User::factory()->create();
+    $actor = auth()->user();
     $project = Project::create([
         'name' => 'Task Fox',
         'workspace_path' => '/tmp/task-fox',
@@ -268,6 +333,6 @@ test('pending approval task can be approved from the task board', function () {
 
     expect($task->refresh())
         ->status->toBe(Task::STATUS_APPROVED)
-        ->approved_by_user_id->not->toBeNull()
+        ->approved_by_user_id->toBe($actor->id)
         ->approved_at->not->toBeNull();
 });

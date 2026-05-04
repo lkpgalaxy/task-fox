@@ -9,6 +9,7 @@ use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Jobs\DispatchNextAiRunJob;
 use App\Models\AiRun;
+use App\Models\AiRunLog;
 use App\Models\InputSource;
 use App\Models\Project;
 use App\Models\Task;
@@ -35,9 +36,10 @@ class TaskController extends Controller
         $tasks = Task::query()
             ->with([
                 'assignee:id,name,github_username',
+                'reviewer:id,name,github_username',
                 'approvedByUser:id,name,github_username',
                 'sourceInput:id,title,analysis_status',
-                'project:id,name,workspace_path,url',
+                'project:id,name,workspace_path,url,default_reviewer_user_id',
                 'latestAiRun' => fn ($query) => $query->select([
                     'ai_runs.id',
                     'ai_runs.task_id',
@@ -57,9 +59,10 @@ class TaskController extends Controller
             $selectedTask = Task::query()
                 ->with([
                     'assignee:id,name,github_username',
+                    'reviewer:id,name,github_username',
                     'approvedByUser:id,name,github_username',
                     'sourceInput:id,title,analysis_status',
-                    'project:id,name,workspace_path,url',
+                    'project:id,name,workspace_path,url,default_reviewer_user_id',
                     'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,last_error,started_at,finished_at,updated_at',
                     'aiRuns.logs:id,ai_run_id,level,message,context,created_at',
                     'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
@@ -93,6 +96,7 @@ class TaskController extends Controller
                 ->map(fn (Project $project): array => [
                     'id' => $project->id,
                     'name' => (string) $project->name,
+                    'default_reviewer_user_id' => $project->default_reviewer_user_id,
                 ]),
             'selectedTask' => $selectedTask,
             'taskStatuses' => [
@@ -132,6 +136,7 @@ class TaskController extends Controller
             'priority' => Arr::get($data, 'priority') ?? Task::PRIORITY_MEDIUM,
             'deadline' => Arr::get($data, 'deadline'),
             'assignee_user_id' => $assigneeUserId,
+            'reviewer_user_id' => Arr::get($data, 'reviewer_user_id') ?: $this->resolveProjectDefaultReviewerId(Arr::get($data, 'project_id')),
             'project_id' => Arr::get($data, 'project_id'),
             'source_input_id' => Arr::get($data, 'source_input_id'),
         ]);
@@ -158,6 +163,7 @@ class TaskController extends Controller
                 'priority',
                 'deadline',
                 'assignee_user_id',
+                'reviewer_user_id',
                 'source_input_id',
                 'project_id',
             ]),
@@ -297,6 +303,149 @@ class TaskController extends Controller
             ->with('status', 'Task rejected.');
     }
 
+    public function retry(Task $task): RedirectResponse
+    {
+        if ($task->status !== Task::STATUS_FAILED) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['status' => 'Only failed tasks can be retried.']);
+        }
+
+        if ($task->project_id === null) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['project' => 'Assign a project before retrying this task.']);
+        }
+
+        $actor = $this->resolveCurrentUser();
+
+        if ($actor === null) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['actor' => 'No actor available to record retry approval.']);
+        }
+
+        $task->update([
+            'status' => Task::STATUS_APPROVED,
+            'approved_by_user_id' => $actor->id,
+            'approved_at' => now(),
+            'rejected_at' => null,
+            'pull_request_url' => null,
+            'pull_request_number' => null,
+        ]);
+
+        if ($task->externalTaskLink) {
+            $this->recordExternalMessage(
+                $task,
+                'attempt',
+                ['task_id' => $task->id, 'status' => Task::STATUS_APPROVED],
+                'success',
+                null,
+            );
+        }
+
+        DispatchNextAiRunJob::dispatch($task->id);
+
+        return redirect()
+            ->route('tasks.index', ['task' => $task->id])
+            ->with('status', 'Task queued for retry.');
+    }
+
+    public function createPullRequest(Task $task): RedirectResponse
+    {
+        $task->loadMissing(['assignee', 'reviewer', 'externalTaskLink', 'latestAiRun', 'project.defaultReviewer']);
+
+        if ($task->pull_request_url) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['pull_request' => 'This task already has a pull request.']);
+        }
+
+        $run = $task->latestAiRun;
+        if (! $run) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['pull_request' => 'No AI run is available for this task.']);
+        }
+
+        if ($run->branch_name === null || $run->branch_name === '') {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['pull_request' => 'The latest AI run does not have a branch to open.']);
+        }
+
+        if ($run->pull_request_url) {
+            $task->update([
+                'status' => Task::STATUS_PR_CREATED,
+                'pull_request_url' => $run->pull_request_url,
+                'pull_request_number' => $run->pull_request_number,
+            ]);
+
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->with('status', 'Task pull request was synced from the latest AI run.');
+        }
+
+        try {
+            $run->update(['status' => AiRun::STATUS_CREATING_PR]);
+
+            $pr = $this->pullRequestProvider->createPullRequest($task, $run);
+
+            $task->update([
+                'status' => Task::STATUS_PR_CREATED,
+                'pull_request_url' => $pr->url,
+                'pull_request_number' => $pr->number,
+            ]);
+
+            $run->update([
+                'status' => AiRun::STATUS_WAITING_FOR_MERGE,
+                'pull_request_url' => $pr->url,
+                'pull_request_number' => $pr->number,
+                'last_error' => null,
+            ]);
+
+            $reviewer = $this->resolvePullRequestReviewer($task);
+
+            if ($reviewer) {
+                $this->pullRequestProvider->requestReview($pr->url, $reviewer);
+            }
+
+            if ($task->externalTaskLink) {
+                $this->recordExternalMessage(
+                    $task,
+                    'pr_attached',
+                    ['task_id' => $task->id, 'run_id' => $run->id, 'pull_request_url' => $pr->url],
+                    'success',
+                    null,
+                );
+
+                $this->externalTaskProvider->attachPullRequest($task->externalTaskLink, $pr->url);
+            }
+
+            $this->recordAiRunLog($run, 'info', 'Pull request created manually', [
+                'pull_request_url' => $pr->url,
+            ]);
+
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->with('status', 'Pull request created.');
+        } catch (Throwable $exception) {
+            $run->update([
+                'status' => AiRun::STATUS_FAILED,
+                'last_error' => $exception->getMessage(),
+                'finished_at' => now(),
+            ]);
+
+            $this->recordAiRunLog($run, 'error', 'Manual pull request creation failed', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['pull_request' => $exception->getMessage()]);
+        }
+    }
+
     public function refreshPullRequest(Task $task): RedirectResponse
     {
         return $this->refreshPr($task);
@@ -363,6 +512,7 @@ class TaskController extends Controller
             'priority' => $task->priority,
             'deadline' => $task->deadline?->toDateString(),
             'assignee_user_id' => $task->assignee_user_id,
+            'reviewer_user_id' => $task->reviewer_user_id,
             'source_input_id' => $task->source_input_id,
             'approved_by_user_id' => $task->approved_by_user_id,
             'approved_at' => $task->approved_at?->toIso8601String(),
@@ -371,9 +521,10 @@ class TaskController extends Controller
             'pull_request_url' => $task->pull_request_url,
             'pull_request_number' => $task->pull_request_number,
             'assignee' => optional($task->assignee)->only(['id', 'name', 'github_username']),
+            'reviewer' => optional($task->reviewer)->only(['id', 'name', 'github_username']),
             'approved_by_user' => optional($task->approvedByUser)->only(['id', 'name', 'github_username']),
             'source_input' => optional($task->sourceInput)->only(['id', 'title', 'analysis_status']),
-            'project' => optional($task->project)->only(['id', 'name', 'workspace_path', 'url']),
+            'project' => optional($task->project)->only(['id', 'name', 'workspace_path', 'url', 'default_reviewer_user_id']),
             'acceptance_criteria' => $this->normalizeCriteria($task->acceptance_criteria ?? []),
             'created_at' => $task->created_at?->toIso8601String(),
             'updated_at' => $task->updated_at?->toIso8601String(),
@@ -448,8 +599,54 @@ class TaskController extends Controller
         ]);
     }
 
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function recordAiRunLog(AiRun $run, string $level, string $message, array $context = []): void
+    {
+        AiRunLog::create([
+            'ai_run_id' => $run->id,
+            'level' => $level,
+            'message' => $message,
+            'context' => array_merge([
+                'pull_request_provider' => (string) config('automation.pull_request_provider', 'github'),
+            ], $context),
+        ]);
+    }
+
+    private function resolvePullRequestReviewer(Task $task): ?User
+    {
+        if ($task->reviewer && $this->hasGithubUsername($task->reviewer)) {
+            return $task->reviewer;
+        }
+
+        $defaultReviewer = $task->project?->defaultReviewer;
+
+        if ($defaultReviewer && $this->hasGithubUsername($defaultReviewer)) {
+            return $defaultReviewer;
+        }
+
+        return $task->assignee;
+    }
+
+    private function resolveProjectDefaultReviewerId(mixed $projectId): ?int
+    {
+        if ($projectId === null || $projectId === '') {
+            return null;
+        }
+
+        return Project::query()
+            ->whereKey($projectId)
+            ->value('default_reviewer_user_id');
+    }
+
+    private function hasGithubUsername(User $user): bool
+    {
+        return $user->github_username !== null && $user->github_username !== '';
+    }
+
     private function resolveCurrentUser(): ?User
     {
-        return Auth::user() ?? User::query()->orderBy('id')->first();
+        return Auth::user();
     }
 }

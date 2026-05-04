@@ -9,6 +9,7 @@ use App\DataTransferObjects\CodingAgentResult;
 use App\Models\AiRun;
 use App\Models\AiRunLog;
 use App\Models\Task;
+use App\Models\User;
 use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -31,7 +32,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         ExternalTaskProvider $externalTaskProvider,
         PullRequestProvider $pullRequestProvider,
     ): void {
-        $run = AiRun::with(['task.assignee', 'task.externalTaskLink'])->find($this->aiRunId);
+        $run = AiRun::with(['task.assignee', 'task.reviewer', 'task.externalTaskLink', 'task.project.defaultReviewer'])->find($this->aiRunId);
 
         if ($run === null || ! $run->task) {
             return;
@@ -127,8 +128,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'pull_request_number' => $pr->number,
             ]);
 
-            if ($task->assignee) {
-                $pullRequestProvider->requestReview($pr->url, $task->assignee);
+            $reviewer = $this->resolvePullRequestReviewer($task);
+
+            if ($reviewer) {
+                $pullRequestProvider->requestReview($pr->url, $reviewer);
             }
 
             if ($task->externalTaskLink) {
@@ -186,6 +189,26 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         return 'ai-task-'.(string) $task->id.'-'.Str::limit($slug, 40, '');
+    }
+
+    private function resolvePullRequestReviewer(Task $task): ?User
+    {
+        if ($task->reviewer && $this->hasGithubUsername($task->reviewer)) {
+            return $task->reviewer;
+        }
+
+        $defaultReviewer = $task->project?->defaultReviewer;
+
+        if ($defaultReviewer && $this->hasGithubUsername($defaultReviewer)) {
+            return $defaultReviewer;
+        }
+
+        return $task->assignee;
+    }
+
+    private function hasGithubUsername(User $user): bool
+    {
+        return $user->github_username !== null && $user->github_username !== '';
     }
 
     private function assertRepositoryReady(string $path, string $baseBranch): void

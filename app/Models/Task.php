@@ -17,6 +17,7 @@ use Illuminate\Database\Query\Builder;
     'priority',
     'deadline',
     'assignee_user_id',
+    'reviewer_user_id',
     'source_input_id',
     'project_id',
     'approved_by_user_id',
@@ -104,6 +105,14 @@ class Task extends Model
     public function approvedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by_user_id');
+    }
+
+    /**
+     * @return BelongsTo<User, Task>
+     */
+    public function reviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reviewer_user_id');
     }
 
     /**

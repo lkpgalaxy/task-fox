@@ -30,6 +30,7 @@ class UpdateTaskRequest extends FormRequest
             'priority' => ['nullable', Rule::in([Task::PRIORITY_LOW, Task::PRIORITY_MEDIUM, Task::PRIORITY_HIGH, Task::PRIORITY_URGENT])],
             'deadline' => ['nullable', 'date'],
             'assignee_user_id' => ['nullable', 'integer', 'exists:users,id'],
+            'reviewer_user_id' => ['nullable', 'integer', 'exists:users,id'],
             'source_input_id' => ['nullable', 'integer', 'exists:input_sources,id'],
             'project_id' => ['nullable', 'integer', 'exists:projects,id'],
             'acceptance_criteria' => ['required', 'array'],

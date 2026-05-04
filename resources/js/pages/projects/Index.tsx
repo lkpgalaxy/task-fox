@@ -11,6 +11,7 @@ import {
     Input,
     Modal,
     Panel,
+    Select,
     TableBody,
     TableHead,
     Td,
@@ -23,6 +24,8 @@ type ProjectRecord = {
     name: string;
     workspace_path: string;
     url: string | null;
+    default_reviewer_user_id: number | null;
+    default_reviewer: ReviewerOption | null;
     credential_username: string | null;
     database_name: string | null;
     database_username: string | null;
@@ -30,6 +33,12 @@ type ProjectRecord = {
     has_database_password: boolean;
     has_credential_password: boolean;
     has_credential_username: boolean;
+};
+
+type ReviewerOption = {
+    id: number;
+    name: string;
+    github_username: string | null;
 };
 
 type ProjectFormData = {
@@ -42,10 +51,12 @@ type ProjectFormData = {
     credential_username: string;
     credential_password: string;
     base_branch: string;
+    default_reviewer_user_id: string;
 };
 
 type PageProps = {
     projects: ProjectRecord[];
+    reviewerOptions: ReviewerOption[];
     flash?: {
         status?: string;
     };
@@ -64,6 +75,7 @@ const emptyProjectForm = (): ProjectFormData => ({
     credential_username: '',
     credential_password: '',
     base_branch: '',
+    default_reviewer_user_id: '',
 });
 
 const formatError = (error: string | string[] | undefined): string | null => {
@@ -77,7 +89,12 @@ const formatError = (error: string | string[] | undefined): string | null => {
 const yesNo = (value: boolean): string => (value ? 'set' : 'not set');
 
 export default function ProjectsIndex() {
-    const { projects: projectRows, flash, errors } = usePage<PageProps>().props;
+    const {
+        projects: projectRows,
+        reviewerOptions,
+        flash,
+        errors,
+    } = usePage<PageProps>().props;
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
     const [editingProject, setEditingProject] = useState<ProjectRecord | null>(
@@ -110,6 +127,8 @@ export default function ProjectsIndex() {
             credential_username: project.credential_username ?? '',
             credential_password: '',
             base_branch: project.base_branch ?? '',
+            default_reviewer_user_id:
+                project.default_reviewer_user_id?.toString() ?? '',
         });
         editForm.clearErrors();
         setShowEditModal(true);
@@ -194,6 +213,7 @@ export default function ProjectsIndex() {
                             <Th>Database</Th>
                             <Th>Repo credentials</Th>
                             <Th>Base</Th>
+                            <Th>Default reviewer</Th>
                             <Th>Actions</Th>
                         </tr>
                     </TableHead>
@@ -256,6 +276,16 @@ export default function ProjectsIndex() {
                                         {project.base_branch ?? 'main'}
                                     </Badge>
                                 </Td>
+                                <Td className="text-ink-muted">
+                                    {project.default_reviewer ? (
+                                        <MetaLine
+                                            label={project.default_reviewer.name}
+                                            value={`@${project.default_reviewer.github_username}`}
+                                        />
+                                    ) : (
+                                        'n/a'
+                                    )}
+                                </Td>
                                 <Td>
                                     <div className="flex flex-wrap gap-2">
                                         <Button
@@ -281,7 +311,7 @@ export default function ProjectsIndex() {
                             <tr>
                                 <Td
                                     className="py-8 text-center text-ink-subtle"
-                                    colSpan={7}
+                                    colSpan={8}
                                 >
                                     No projects yet.
                                 </Td>
@@ -295,6 +325,7 @@ export default function ProjectsIndex() {
                 show={showCreateModal}
                 title="Create project"
                 form={createForm}
+                reviewerOptions={reviewerOptions}
                 isEditing={false}
                 processingLabel="Creating..."
                 submitLabel="Create"
@@ -310,6 +341,7 @@ export default function ProjectsIndex() {
                         : 'Edit project'
                 }
                 form={editForm}
+                reviewerOptions={reviewerOptions}
                 isEditing
                 processingLabel="Saving..."
                 submitLabel="Save"
@@ -324,6 +356,7 @@ function ProjectModal({
     show,
     title,
     form,
+    reviewerOptions,
     isEditing,
     processingLabel,
     submitLabel,
@@ -333,6 +366,7 @@ function ProjectModal({
     show: boolean;
     title: string;
     form: ReturnType<typeof useForm<ProjectFormData>>;
+    reviewerOptions: ReviewerOption[];
     isEditing: boolean;
     processingLabel: string;
     submitLabel: string;
@@ -342,7 +376,11 @@ function ProjectModal({
     return (
         <Modal show={show} onClose={onClose} title={title}>
             <form onSubmit={onSubmit} className="space-y-4">
-                <ProjectFormFields form={form} isEditing={isEditing} />
+                <ProjectFormFields
+                    form={form}
+                    reviewerOptions={reviewerOptions}
+                    isEditing={isEditing}
+                />
                 <div className="flex justify-end gap-2">
                     <Button type="button" variant="ghost" onClick={onClose}>
                         Cancel
@@ -362,6 +400,7 @@ function ProjectModal({
 
 function ProjectFormFields({
     form,
+    reviewerOptions,
     isEditing,
 }: {
     form: {
@@ -372,6 +411,7 @@ function ProjectFormFields({
         ) => void;
         errors: Record<string, string | string[]>;
     };
+    reviewerOptions: ReviewerOption[];
     isEditing: boolean;
 }) {
     return (
@@ -489,6 +529,30 @@ function ProjectFormFields({
                     }
                     placeholder="main"
                 />
+            </Field>
+
+            <Field
+                label="Default reviewer"
+                error={formatError(form.errors.default_reviewer_user_id)}
+            >
+                <Select
+                    value={form.data.default_reviewer_user_id}
+                    onChange={(event) =>
+                        form.setData(
+                            'default_reviewer_user_id',
+                            event.target.value,
+                        )
+                    }
+                >
+                    <option value="">Use task assignee</option>
+                    {reviewerOptions.map((user) => (
+                        <option key={user.id} value={user.id.toString()}>
+                            {user.github_username
+                                ? `${user.name} (@${user.github_username})`
+                                : `${user.name} (no GitHub username)`}
+                        </option>
+                    ))}
+                </Select>
             </Field>
 
             <Panel className="space-y-2 p-3 text-xs text-ink-subtle">
