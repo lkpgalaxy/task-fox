@@ -9,7 +9,7 @@ use App\Models\AiRun;
 use App\Models\Task;
 use App\Models\User;
 use Exception;
-use Illuminate\Support\Arr;
+use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 
 class GithubPullRequestProvider implements PullRequestProvider
@@ -17,6 +17,9 @@ class GithubPullRequestProvider implements PullRequestProvider
     public function createPullRequest(Task $task, AiRun $run): PullRequestResult
     {
         $body = $this->buildPrBody($task);
+        $repositoryPath = $this->resolveRepositoryPath($run);
+
+        $this->commitPendingChanges($repositoryPath, $task);
 
         $result = $this->runProcess([
             'gh',
@@ -28,29 +31,22 @@ class GithubPullRequestProvider implements PullRequestProvider
             $body,
             '--head',
             $run->branch_name,
-            '--json',
-            'url,number',
-        ], $this->resolveRepositoryPath($run));
+        ], $repositoryPath);
 
         if (! $result->isSuccessful()) {
             throw new Exception('gh pr create failed: '.trim((string) $result->getErrorOutput()));
         }
 
-        $payload = json_decode((string) $result->getOutput(), true);
-        if (! is_array($payload)) {
-            throw new Exception('Invalid gh output for PR creation');
-        }
+        $url = $this->parsePullRequestUrl((string) $result->getOutput());
+        $number = $this->parsePullRequestNumber($url);
 
-        $url = Arr::get($payload, 'url');
-        $number = Arr::get($payload, 'number', 0);
-
-        if (! is_string($url) || $url === '' || ! is_int($number) && ! ctype_digit((string) $number)) {
+        if ($number === null) {
             throw new Exception('gh pr create returned invalid values.');
         }
 
         return new PullRequestResult(
             url: $url,
-            number: (int) $number,
+            number: $number,
         );
     }
 
@@ -133,6 +129,62 @@ Description:
 Acceptance criteria:
 {$items}
 BODY;
+    }
+
+    private function parsePullRequestUrl(string $output): string
+    {
+        if (! preg_match('~https?://\S+~', $output, $matches)) {
+            throw new Exception('Invalid gh output for PR creation');
+        }
+
+        return rtrim($matches[0], " \t\n\r\0\x0B.,)");
+    }
+
+    private function parsePullRequestNumber(string $url): ?int
+    {
+        if (! preg_match('~/pull/(\d+)(?:[/?#]|$)~', $url, $matches)) {
+            return null;
+        }
+
+        return (int) $matches[1];
+    }
+
+    private function commitPendingChanges(string $path, Task $task): void
+    {
+        $status = $this->runProcess(['git', 'status', '--short'], $path);
+        if (! $status->isSuccessful()) {
+            throw new Exception('Unable to inspect changes before pull request creation: '.trim((string) $status->getErrorOutput()));
+        }
+
+        if (trim((string) $status->getOutput()) === '') {
+            return;
+        }
+
+        $add = $this->runProcess(['git', 'add', '--all'], $path);
+        if (! $add->isSuccessful()) {
+            throw new Exception('Unable to stage changes before pull request creation: '.trim((string) $add->getErrorOutput()));
+        }
+
+        $diff = $this->runProcess(['git', 'diff', '--cached', '--quiet'], $path);
+        if ($diff->getExitCode() === 0) {
+            return;
+        }
+
+        if ($diff->getExitCode() !== 1) {
+            throw new Exception('Unable to inspect staged changes before pull request creation: '.trim((string) $diff->getErrorOutput()));
+        }
+
+        $commit = $this->runProcess(['git', 'commit', '-m', $this->makeCommitMessage($task)], $path);
+        if (! $commit->isSuccessful()) {
+            throw new Exception('Unable to commit changes before pull request creation: '.trim((string) $commit->getErrorOutput()));
+        }
+    }
+
+    private function makeCommitMessage(Task $task): string
+    {
+        $slug = Str::slug((string) $task->title);
+
+        return 'feat: complete task '.(string) $task->id.($slug !== '' ? ' '.$slug : '');
     }
 
     private function resolveExecutionPath(?string $path = null): string

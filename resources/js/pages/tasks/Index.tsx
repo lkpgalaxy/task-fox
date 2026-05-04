@@ -506,7 +506,7 @@ export default function TasksIndex() {
         >
             <Head title="Tasks" />
 
-            <div className="space-y-4">
+            <div className="flex h-[calc(100vh-11.5rem)] min-h-[420px] flex-col gap-4 overflow-hidden">
                 {flash?.status ? <Alert>{flash.status}</Alert> : null}
                 {errors?.status ? (
                     <Alert tone="danger">{formatError(errors.status)}</Alert>
@@ -517,45 +517,47 @@ export default function TasksIndex() {
                     </Alert>
                 ) : null}
 
-                <section className="grid min-h-[640px] auto-cols-[minmax(340px,420px)] grid-flow-col gap-3 overflow-x-auto pb-2">
-                    {taskStatuses.map((status) => {
-                        const tasksInStatus = groupedTasks[status] ?? [];
+                <section className="min-h-0 flex-1 overflow-x-auto overscroll-x-contain pb-3">
+                    <div className="grid h-full min-w-max auto-cols-[minmax(320px,min(420px,calc(100vw-3rem)))] grid-flow-col gap-3 pr-4 sm:auto-cols-[minmax(340px,420px)]">
+                        {taskStatuses.map((status) => {
+                            const tasksInStatus = groupedTasks[status] ?? [];
 
-                        return (
-                            <article
-                                key={status}
-                                className="flex max-h-[calc(100vh-240px)] min-h-[520px] flex-col rounded-lg border border-hairline bg-surface-1"
-                            >
-                                <div className="flex items-center justify-between gap-2 border-b border-hairline px-3 py-2.5">
-                                    <h2 className="truncate text-xs font-semibold tracking-[0.04em] text-ink-muted uppercase">
-                                        {taskStatusLabel(status)}
-                                    </h2>
-                                    <span className="rounded-md border border-hairline-strong bg-surface-3 px-1.5 py-0.5 text-xs text-ink-subtle">
-                                        {tasksInStatus.length}
-                                    </span>
-                                </div>
-                                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
-                                    {tasksInStatus.map((task) => (
-                                        <TaskCard
-                                            key={task.id}
-                                            task={task}
-                                            selected={
-                                                selectedTask?.id === task.id
-                                            }
-                                            onOpen={() =>
-                                                openTaskDetails(task.id)
-                                            }
-                                        />
-                                    ))}
-                                    {tasksInStatus.length === 0 ? (
-                                        <div className="rounded-md border border-dashed border-hairline-strong bg-surface-2/60 px-3 py-8 text-center text-sm text-ink-tertiary">
-                                            No tasks
-                                        </div>
-                                    ) : null}
-                                </div>
-                            </article>
-                        );
-                    })}
+                            return (
+                                <article
+                                    key={status}
+                                    className="flex min-h-0 flex-col rounded-lg border border-hairline bg-surface-1"
+                                >
+                                    <div className="flex items-center justify-between gap-2 border-b border-hairline px-3 py-2.5">
+                                        <h2 className="truncate text-xs font-semibold tracking-[0.04em] text-ink-muted uppercase">
+                                            {taskStatusLabel(status)}
+                                        </h2>
+                                        <span className="rounded-md border border-hairline-strong bg-surface-3 px-1.5 py-0.5 text-xs text-ink-subtle">
+                                            {tasksInStatus.length}
+                                        </span>
+                                    </div>
+                                    <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
+                                        {tasksInStatus.map((task) => (
+                                            <TaskCard
+                                                key={task.id}
+                                                task={task}
+                                                selected={
+                                                    selectedTask?.id === task.id
+                                                }
+                                                onOpen={() =>
+                                                    openTaskDetails(task.id)
+                                                }
+                                            />
+                                        ))}
+                                        {tasksInStatus.length === 0 ? (
+                                            <div className="rounded-md border border-dashed border-hairline-strong bg-surface-2/60 px-3 py-8 text-center text-sm text-ink-tertiary">
+                                                No tasks
+                                            </div>
+                                        ) : null}
+                                    </div>
+                                </article>
+                            );
+                        })}
+                    </div>
                 </section>
             </div>
 
@@ -710,6 +712,9 @@ function TaskDetails({
         task.latest_ai_run?.branch_name === null ||
         task.latest_ai_run?.branch_name === undefined ||
         task.latest_ai_run.branch_name === '';
+    const aiRuns = [...(task.ai_runs ?? [])].sort((first, second) => {
+        return second.id - first.id;
+    });
 
     return (
         <div className="space-y-5">
@@ -872,20 +877,25 @@ function TaskDetails({
                 <div className="mb-3 flex items-center justify-between">
                     <h3 className="text-sm font-semibold text-ink">AI runs</h3>
                     <span className="text-xs text-ink-subtle">
-                        {task.ai_runs?.length ?? 0} total
+                        {aiRuns.length} total, latest first
                     </span>
                 </div>
-                {task.ai_runs?.length ? (
+                {aiRuns.length ? (
                     <div className="space-y-3">
-                        {task.ai_runs.map((run) => (
+                        {aiRuns.map((run, index) => (
                             <div
                                 key={run.id}
                                 className="rounded-md border border-hairline bg-surface-2 p-3"
                             >
                                 <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <p className="text-sm font-medium text-ink">
-                                        Run #{run.id}
-                                    </p>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <p className="text-sm font-medium text-ink">
+                                            Run #{run.id}
+                                        </p>
+                                        {index === 0 ? (
+                                            <Badge>Latest</Badge>
+                                        ) : null}
+                                    </div>
                                     <Badge value={run.status}>
                                         {taskStatusLabel(run.status)}
                                     </Badge>

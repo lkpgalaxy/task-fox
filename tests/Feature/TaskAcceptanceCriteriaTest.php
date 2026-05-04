@@ -11,6 +11,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Testing\AssertableInertia as Assert;
+use Symfony\Component\Process\Process;
 
 uses(RefreshDatabase::class);
 
@@ -196,6 +197,66 @@ test('pull request body renders acceptance criteria from the task json column', 
     expect($body)->toContain('- [x] PR body includes the stored criterion.');
 });
 
+test('github pull request creation parses gh create url output', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-gh-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-gh-bin-'.uniqid();
+    $argsPath = $binPath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    runTaskAcceptanceProcess(['git', 'init', '-b', 'main'], $workspacePath);
+    runTaskAcceptanceProcess(['git', 'config', 'user.email', 'tests@example.com'], $workspacePath);
+    runTaskAcceptanceProcess(['git', 'config', 'user.name', 'Task Fox Tests'], $workspacePath);
+    file_put_contents($workspacePath.'/README.md', "Initial content\n");
+    runTaskAcceptanceProcess(['git', 'add', 'README.md'], $workspacePath);
+    runTaskAcceptanceProcess(['git', 'commit', '-m', 'Initial commit'], $workspacePath);
+    runTaskAcceptanceProcess(['git', 'checkout', '-b', 'task/create-pr'], $workspacePath);
+    file_put_contents($workspacePath.'/feature.txt', "Generated change\n");
+
+    file_put_contents(
+        $binPath.'/gh',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '%s\n' 'https://github.com/example/repo/pull/456'\n"
+    );
+    chmod($binPath.'/gh', 0755);
+
+    $task = Task::create([
+        'title' => 'Create PR',
+        'description' => 'Open the pull request.',
+        'acceptance_criteria' => [
+            ['body' => 'PR can be created.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_CREATING_PR,
+        'branch_name' => 'task/create-pr',
+        'repository_path' => $workspacePath,
+        'workspace_path' => $workspacePath,
+    ]);
+
+    $originalPath = getenv('PATH');
+    putenv('PATH='.$binPath.PATH_SEPARATOR.$originalPath);
+
+    try {
+        $result = (new GithubPullRequestProvider)->createPullRequest($task, $run);
+    } finally {
+        putenv('PATH='.$originalPath);
+    }
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+    $commit = trim(runTaskAcceptanceProcess(['git', 'log', '-1', '--pretty=%s'], $workspacePath));
+
+    expect($result)
+        ->url->toBe('https://github.com/example/repo/pull/456')
+        ->number->toBe(456)
+        ->and($commit)->toBe('feat: complete task '.$task->id.' create-pr')
+        ->and($args)->toContain('pr')
+        ->and($args)->toContain('create')
+        ->and($args)->not->toContain('--json');
+});
+
 test('codex agent prompt renders acceptance criteria from the task json column', function () {
     $task = Task::create([
         'title' => 'Implement feature',
@@ -226,7 +287,89 @@ test('codex agent prompt renders acceptance criteria from the task json column',
     $result = $agent->run($task, $run);
 
     expect($result->successful)->toBeTrue()
-        ->and(file_get_contents($argsPath))->toContain('- Prompt includes the stored criterion.');
+        ->and(file_get_contents($argsPath))->toContain('Prompt includes the stored criterion.');
+});
+
+test('codex agent prompt enforces acceptance criteria driven implementation workflow', function () {
+    $task = Task::create([
+        'title' => 'Implement workflow',
+        'description' => 'Use acceptance criteria as the implementation contract.',
+        'acceptance_criteria' => [
+            ['body' => 'List criteria before implementation.', 'checked' => false],
+            ['body' => 'Report verification proof for each criterion.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('buildTaskPrompt');
+    $prompt = $method->invoke(new CodexCodingAgent, $task);
+
+    expect($prompt)
+        ->toContain('Acceptance-criteria-driven workflow:')
+        ->toContain('1. List criteria before implementation.')
+        ->toContain('2. Report verification proof for each criterion.')
+        ->toContain('extract and list every acceptance criterion')
+        ->toContain('verification checklist with one expected proof per item')
+        ->toContain('Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs')
+        ->toContain('pause and ask for clarification before implementation')
+        ->toContain('Pest feature/unit tests so each acceptance criterion has direct coverage')
+        ->toContain('run TypeScript/lint checks for React/Inertia changes')
+        ->toContain('vendor/bin/pint --dirty --format agent')
+        ->toContain('php artisan test --compact')
+        ->toContain('Fix failing tests instead of ignoring them')
+        ->toContain('explicitly mark every acceptance criterion as satisfied')
+        ->toContain('Final response must include the acceptance-criteria checklist, tests run, and whether they passed');
+});
+
+test('codex agent prompt pauses when acceptance criteria are absent', function () {
+    $task = Task::create([
+        'title' => 'Implement unclear task',
+        'description' => 'This task needs explicit acceptance criteria first.',
+        'acceptance_criteria' => [],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('buildTaskPrompt');
+    $prompt = $method->invoke(new CodexCodingAgent, $task);
+
+    expect($prompt)
+        ->toContain('- No acceptance criteria were provided.')
+        ->toContain('If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.');
+});
+
+test('codex agent refuses to implement tasks without acceptance criteria', function () {
+    $task = Task::create([
+        'title' => 'Implement unclear task',
+        'description' => 'This task needs explicit acceptance criteria first.',
+        'acceptance_criteria' => [],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'task/unclear',
+        'repository_path' => base_path(),
+    ]);
+    $binPath = sys_get_temp_dir().'/task-fox-codex-unused-'.uniqid();
+    $argsPath = $binPath.'/args.txt';
+
+    mkdir($binPath);
+    file_put_contents($binPath.'/codex', "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\n");
+    chmod($binPath.'/codex', 0755);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->run($task, $run);
+
+    expect($result)
+        ->successful->toBeFalse()
+        ->error->toBe('Acceptance criteria are required before implementation.')
+        ->and(file_exists($argsPath))->toBeFalse();
 });
 
 test('task index loads latest ai run without ambiguous columns', function () {
@@ -336,3 +479,15 @@ test('pending approval task can be approved from the task board', function () {
         ->approved_by_user_id->toBe($actor->id)
         ->approved_at->not->toBeNull();
 });
+
+function runTaskAcceptanceProcess(array $command, string $cwd): string
+{
+    $process = new Process($command, $cwd);
+    $process->run();
+
+    if (! $process->isSuccessful()) {
+        throw new RuntimeException($process->getErrorOutput());
+    }
+
+    return (string) $process->getOutput();
+}

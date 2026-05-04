@@ -8,6 +8,7 @@ use App\Models\AiRun;
 use App\Models\InputSource;
 use App\Models\Task;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
 use JsonException;
 use Symfony\Component\Process\Process;
@@ -23,12 +24,15 @@ class CodexCodingAgent implements CodingAgent
 
     public function run(Task $task, AiRun $run): CodingAgentResult
     {
-        $prompt = "Implement task {$task->id}: {$task->title}\n".
-            "Description:\n{$task->description}\n\n".
-            "Acceptance criteria:\n".
-            collect($task->acceptance_criteria ?? [])
-                ->map(static fn (array $criterion): string => "- {$criterion['body']}")
-                ->join("\n");
+        if ($this->acceptanceCriteria($task)->isEmpty()) {
+            return new CodingAgentResult(
+                successful: false,
+                messages: [],
+                error: 'Acceptance criteria are required before implementation.',
+            );
+        }
+
+        $prompt = $this->buildTaskPrompt($task);
 
         $command = $this->buildCommand($task, $run, $prompt);
         $repositoryPath = $this->resolveWorkspacePath($run);
@@ -66,6 +70,50 @@ class CodexCodingAgent implements CodingAgent
             successful: true,
             messages: $messages,
         );
+    }
+
+    private function buildTaskPrompt(Task $task): string
+    {
+        $criteria = $this->acceptanceCriteria($task);
+
+        $criteriaList = $criteria->isEmpty()
+            ? '- No acceptance criteria were provided.'
+            : $criteria
+                ->map(static fn (string $criterion, int $index): string => ($index + 1).". {$criterion}")
+                ->join("\n");
+
+        return <<<PROMPT
+Implement task {$task->id}: {$task->title}
+
+Description:
+{$task->description}
+
+Acceptance criteria:
+{$criteriaList}
+
+Acceptance-criteria-driven workflow:
+1. Before implementation, extract and list every acceptance criterion from the task.
+2. Convert the criteria into a verification checklist with one expected proof per item.
+3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
+4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
+5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
+6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
+7. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+8. Fix failing tests instead of ignoring them.
+9. Before finishing, explicitly mark every acceptance criterion as satisfied.
+10. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+PROMPT;
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function acceptanceCriteria(Task $task): Collection
+    {
+        return collect($task->acceptance_criteria ?? [])
+            ->map(static fn (array $criterion): string => trim((string) Arr::get($criterion, 'body', '')))
+            ->filter(static fn (string $criterion): bool => $criterion !== '')
+            ->values();
     }
 
     /**
