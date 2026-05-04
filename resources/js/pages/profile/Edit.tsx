@@ -1,19 +1,16 @@
 import { Head, useForm, usePage } from '@inertiajs/react';
 import type { FormEvent } from 'react';
 import { AppShell } from '@/components/app-shell';
-import { Alert, Button, Field, Input, Panel } from '@/components/ui';
+import { Button, Field, Input, Panel } from '@/components/ui';
 import profile from '@/routes/profile';
 import type { Auth } from '@/types';
 
 type PageProps = {
     auth: Auth;
-    flash?: {
-        status?: string;
-    };
 };
 
 export default function ProfileEdit() {
-    const { auth, flash } = usePage<PageProps>().props;
+    const { auth } = usePage<PageProps>().props;
     const user = auth.user;
 
     const profileForm = useForm({
@@ -51,12 +48,6 @@ export default function ProfileEdit() {
             <Head title="Profile" />
 
             <div className="grid gap-4 lg:grid-cols-2">
-                {flash?.status ? (
-                    <div className="lg:col-span-2">
-                        <Alert>{flash.status}</Alert>
-                    </div>
-                ) : null}
-
                 <Panel className="p-5">
                     <form className="grid gap-4" onSubmit={submitProfile}>
                         <h2 className="text-base font-semibold text-ink">

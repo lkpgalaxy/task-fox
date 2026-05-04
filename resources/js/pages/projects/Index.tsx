@@ -57,9 +57,6 @@ type ProjectFormData = {
 type PageProps = {
     projects: ProjectRecord[];
     reviewerOptions: ReviewerOption[];
-    flash?: {
-        status?: string;
-    };
     errors?: {
         [key: string]: string | string[] | undefined;
     };
@@ -92,7 +89,6 @@ export default function ProjectsIndex() {
     const {
         projects: projectRows,
         reviewerOptions,
-        flash,
         errors,
     } = usePage<PageProps>().props;
     const [showCreateModal, setShowCreateModal] = useState(false);
@@ -199,7 +195,6 @@ export default function ProjectsIndex() {
             <Head title="Projects" />
 
             <div className="space-y-4">
-                {flash?.status ? <Alert>{flash.status}</Alert> : null}
                 {errors?.project ? (
                     <Alert tone="danger">{formatError(errors.project)}</Alert>
                 ) : null}
@@ -279,7 +274,9 @@ export default function ProjectsIndex() {
                                 <Td className="text-ink-muted">
                                     {project.default_reviewer ? (
                                         <MetaLine
-                                            label={project.default_reviewer.name}
+                                            label={
+                                                project.default_reviewer.name
+                                            }
                                             value={`@${project.default_reviewer.github_username}`}
                                         />
                                     ) : (

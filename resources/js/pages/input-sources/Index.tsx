@@ -2,7 +2,6 @@ import { Head, Link, usePage } from '@inertiajs/react';
 import { useState } from 'react';
 import { AppShell } from '@/components/app-shell';
 import {
-    Alert,
     Badge,
     Button,
     DataTable,
@@ -49,9 +48,6 @@ type PaginatedSources = {
 
 type PageProps = {
     sources: PaginatedSources;
-    flash?: {
-        status?: string;
-    };
 };
 
 const formatFileSize = (size: number | null): string => {
@@ -95,7 +91,7 @@ const safeJson = (value: unknown): string | null => {
 };
 
 export default function InputSourcesIndex() {
-    const { sources, flash } = usePage<PageProps>().props;
+    const { sources } = usePage<PageProps>().props;
     const [selectedAnalysisResult, setSelectedAnalysisResult] = useState<{
         title: string;
         json: string;
@@ -110,8 +106,6 @@ export default function InputSourcesIndex() {
             <Head title="Input sources" />
 
             <div className="space-y-4">
-                {flash?.status ? <Alert>{flash.status}</Alert> : null}
-
                 <DataTable>
                     <TableHead>
                         <tr>

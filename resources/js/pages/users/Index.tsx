@@ -40,9 +40,6 @@ type UserFormData = {
 type PageProps = {
     users: UserRecord[];
     roles: Array<'admin' | 'user'>;
-    flash?: {
-        status?: string;
-    };
     errors?: {
         user?: string;
         role?: string;
@@ -71,7 +68,7 @@ const formatDate = (value: string | null): string => {
 };
 
 export default function UsersIndex() {
-    const { users: userRows, roles, flash, errors } = usePage<PageProps>().props;
+    const { users: userRows, roles, errors } = usePage<PageProps>().props;
     const [showModal, setShowModal] = useState(false);
     const [editingUser, setEditingUser] = useState<UserRecord | null>(null);
     const form = useForm<UserFormData>(emptyForm());
@@ -147,7 +144,6 @@ export default function UsersIndex() {
             <Head title="Users" />
 
             <div className="space-y-4">
-                {flash?.status ? <Alert>{flash.status}</Alert> : null}
                 {errors?.user ? (
                     <Alert tone="danger">{errors.user}</Alert>
                 ) : null}

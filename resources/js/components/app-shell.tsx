@@ -1,5 +1,8 @@
 import { Link, usePage } from '@inertiajs/react';
+import { useMemo } from 'react';
 import type { ReactNode } from 'react';
+import { ToastStack } from '@/components/toast-stack';
+import type { Toast } from '@/components/toast-stack';
 import { cn } from '@/lib/utils';
 import { logout } from '@/routes';
 import inputSources from '@/routes/input-sources';
@@ -21,11 +24,14 @@ const navigation = [
     { label: 'Logs', href: logs.index.url(), match: '/logs' },
 ];
 
+const emptyToasts: Toast[] = [];
+
 export function AppShell({
     title,
     description,
     actions,
     children,
+    toasts = emptyToasts,
     width = 'wide',
     showHeaderText = true,
 }: {
@@ -33,12 +39,31 @@ export function AppShell({
     description?: string;
     actions?: ReactNode;
     children: ReactNode;
+    toasts?: Toast[];
     width?: 'wide' | 'full';
     showHeaderText?: boolean;
 }) {
-    const { url, props } = usePage<{ auth: Auth }>();
+    const { url, props } = usePage<{
+        auth: Auth;
+        flash?: { status?: string };
+    }>();
     const pathname = url.split('?')[0] ?? url;
     const authUser = props.auth.user;
+    const toastMessages = useMemo(
+        () => [
+            ...(props.flash?.status
+                ? [
+                      {
+                          id: `flash-status-${props.flash.status}`,
+                          tone: 'success' as const,
+                          message: props.flash.status,
+                      },
+                  ]
+                : []),
+            ...toasts,
+        ],
+        [props.flash?.status, toasts],
+    );
     const visibleNavigation =
         authUser?.role === 'admin'
             ? [
@@ -49,6 +74,8 @@ export function AppShell({
 
     return (
         <div className="min-h-screen bg-canvas text-ink">
+            <ToastStack toasts={toastMessages} />
+
             <header className="sticky top-0 z-30 border-b border-hairline bg-canvas/95 backdrop-blur">
                 <div className="mx-auto flex h-14 max-w-[1500px] items-center justify-between gap-4 px-4 sm:px-6">
                     <Link

@@ -140,10 +140,6 @@ type IndexPageProps = {
     selectedTask: TaskRecord | null;
     taskStatuses: string[];
     priorities: string[];
-    flash?: {
-        status?: string;
-        errors?: Record<string, string | string[]>;
-    };
     errors?: Record<string, string | string[]>;
 };
 
@@ -222,7 +218,6 @@ export default function TasksIndex() {
         selectedTask,
         taskStatuses,
         priorities,
-        flash,
         errors,
         auth,
     } = page.props;
@@ -504,6 +499,20 @@ export default function TasksIndex() {
     const prIdentityModalOpen =
         showPrIdentityModal ||
         (hasPrIdentityError && !dismissedPrIdentityError);
+    const pullRequestError = formatError(errors?.pull_request);
+    const toasts = useMemo(
+        () =>
+            pullRequestError
+                ? [
+                      {
+                          id: `pull-request-${pullRequestError}`,
+                          tone: 'danger' as const,
+                          message: pullRequestError,
+                      },
+                  ]
+                : [],
+        [pullRequestError],
+    );
     const closePrIdentityModal = () => {
         setShowPrIdentityModal(false);
         setDismissedPrIdentityError(true);
@@ -530,6 +539,7 @@ export default function TasksIndex() {
             description="Analyze input, shape tasks, and track coding-agent execution across the workspace."
             width="full"
             showHeaderText={false}
+            toasts={toasts}
             actions={
                 <>
                     <UploadSourceAction />
@@ -546,14 +556,8 @@ export default function TasksIndex() {
             <Head title="Tasks" />
 
             <div className="flex h-[calc(100vh-11.5rem)] min-h-[420px] flex-col gap-4 overflow-hidden">
-                {flash?.status ? <Alert>{flash.status}</Alert> : null}
                 {errors?.status ? (
                     <Alert tone="danger">{formatError(errors.status)}</Alert>
-                ) : null}
-                {errors?.pull_request ? (
-                    <Alert tone="danger">
-                        {formatError(errors.pull_request)}
-                    </Alert>
                 ) : null}
 
                 <section className="min-h-0 flex-1 overflow-x-auto overscroll-x-contain pb-3">
