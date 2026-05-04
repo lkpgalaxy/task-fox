@@ -11,8 +11,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
-#[Fillable(['name', 'email', 'password', 'github_username', 'role', 'disabled_at'])]
-#[Hidden(['password', 'remember_token'])]
+#[Fillable(['name', 'email', 'password', 'github_username', 'github_token', 'role', 'disabled_at'])]
+#[Hidden(['password', 'remember_token', 'github_token'])]
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
@@ -57,6 +57,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'github_token' => 'encrypted',
             'disabled_at' => 'datetime',
         ];
     }

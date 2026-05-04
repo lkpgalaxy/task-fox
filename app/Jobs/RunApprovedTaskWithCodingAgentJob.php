@@ -114,7 +114,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
 
             $run->update(['status' => AiRun::STATUS_CREATING_PR]);
-            $pr = $pullRequestProvider->createPullRequest($task, $run);
+            $pr = $pullRequestProvider->createPullRequest($task, $run, $task->assignee);
 
             $task->update([
                 'status' => Task::STATUS_PR_CREATED,
@@ -131,7 +131,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             $reviewer = $this->resolvePullRequestReviewer($task);
 
             if ($reviewer) {
-                $pullRequestProvider->requestReview($pr->url, $reviewer);
+                $pullRequestProvider->requestReview($pr->url, $reviewer, $task->assignee);
             }
 
             if ($task->externalTaskLink) {

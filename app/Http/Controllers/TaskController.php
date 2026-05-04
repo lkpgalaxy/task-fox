@@ -203,6 +203,26 @@ class TaskController extends Controller
             ->with('status', 'Task updated.');
     }
 
+    public function submitForApproval(Task $task): RedirectResponse
+    {
+        if ($task->status !== Task::STATUS_DRAFT) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['status' => 'Only draft tasks can be submitted for approval.']);
+        }
+
+        $task->update([
+            'status' => Task::STATUS_PENDING_APPROVAL,
+            'rejected_at' => null,
+            'approved_at' => null,
+            'approved_by_user_id' => null,
+        ]);
+
+        return redirect()
+            ->route('tasks.index', ['task' => $task->id])
+            ->with('status', 'Task submitted for approval.');
+    }
+
     public function approve(Task $task): RedirectResponse
     {
         if ($task->project_id === null) {
@@ -354,6 +374,7 @@ class TaskController extends Controller
     public function createPullRequest(Task $task): RedirectResponse
     {
         $task->loadMissing(['assignee', 'reviewer', 'externalTaskLink', 'latestAiRun', 'project.defaultReviewer']);
+        $actor = $this->resolveCurrentUser();
 
         if ($task->pull_request_url) {
             return redirect()
@@ -374,6 +395,14 @@ class TaskController extends Controller
                 ->withErrors(['pull_request' => 'The latest AI run does not have a branch to open.']);
         }
 
+        if (! $actor || trim((string) $actor->email) === '' || ! $this->hasGithubUsername($actor) || ! $this->hasGithubToken($actor)) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors([
+                    'pull_request_identity' => 'Complete your profile email, GitHub username, and GitHub token before creating a pull request.',
+                ]);
+        }
+
         if ($run->pull_request_url) {
             $task->update([
                 'status' => Task::STATUS_PR_CREATED,
@@ -389,7 +418,7 @@ class TaskController extends Controller
         try {
             $run->update(['status' => AiRun::STATUS_CREATING_PR]);
 
-            $pr = $this->pullRequestProvider->createPullRequest($task, $run);
+            $pr = $this->pullRequestProvider->createPullRequest($task, $run, $actor);
 
             $task->update([
                 'status' => Task::STATUS_PR_CREATED,
@@ -407,7 +436,7 @@ class TaskController extends Controller
             $reviewer = $this->resolvePullRequestReviewer($task);
 
             if ($reviewer) {
-                $this->pullRequestProvider->requestReview($pr->url, $reviewer);
+                $this->pullRequestProvider->requestReview($pr->url, $reviewer, $actor);
             }
 
             if ($task->externalTaskLink) {
@@ -643,6 +672,11 @@ class TaskController extends Controller
     private function hasGithubUsername(User $user): bool
     {
         return $user->github_username !== null && $user->github_username !== '';
+    }
+
+    private function hasGithubToken(User $user): bool
+    {
+        return $user->github_token !== null && $user->github_token !== '';
     }
 
     private function resolveCurrentUser(): ?User

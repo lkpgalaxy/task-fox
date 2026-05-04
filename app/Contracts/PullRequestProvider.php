@@ -10,9 +10,9 @@ use App\Models\User;
 
 interface PullRequestProvider
 {
-    public function createPullRequest(Task $task, AiRun $run): PullRequestResult;
+    public function createPullRequest(Task $task, AiRun $run, ?User $author = null): PullRequestResult;
 
-    public function requestReview(string $pullRequestUrl, User $user): void;
+    public function requestReview(string $pullRequestUrl, User $user, ?User $actor = null): void;
 
     public function getReviewState(string $pullRequestUrl): PullRequestReviewState;
 }

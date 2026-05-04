@@ -32,6 +32,7 @@ Route::middleware(['auth', 'enabled'])->group(function (): void {
     Route::get('/tasks', [TaskController::class, 'index'])->name('tasks.index');
     Route::post('/tasks', [TaskController::class, 'store'])->name('tasks.store');
     Route::patch('/tasks/{task}', [TaskController::class, 'update'])->name('tasks.update');
+    Route::post('/tasks/{task}/submit-for-approval', [TaskController::class, 'submitForApproval'])->name('tasks.submit-for-approval');
     Route::post('/tasks/{task}/approve', [TaskController::class, 'approve'])->name('tasks.approve');
     Route::post('/tasks/{task}/reject', [TaskController::class, 'reject'])->name('tasks.reject');
     Route::post('/tasks/{task}/retry', [TaskController::class, 'retry'])->name('tasks.retry');

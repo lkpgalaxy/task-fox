@@ -18,7 +18,13 @@ class ProfileController extends Controller
 
     public function update(UpdateProfileRequest $request): RedirectResponse
     {
-        $request->user()?->update($request->validated());
+        $data = $request->validated();
+
+        if (trim((string) ($data['github_token'] ?? '')) === '') {
+            unset($data['github_token']);
+        }
+
+        $request->user()?->update($data);
 
         return redirect()
             ->route('profile.edit')

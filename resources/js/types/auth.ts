@@ -3,6 +3,7 @@ export type User = {
     name: string;
     email: string;
     github_username?: string | null;
+    has_github_token?: boolean;
     role: 'admin' | 'user';
     disabled_at?: string | null;
     avatar?: string;

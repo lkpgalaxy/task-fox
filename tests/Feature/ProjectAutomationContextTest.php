@@ -308,7 +308,7 @@ test('pull request review is requested from the project default reviewer before 
         'base_branch' => 'main',
     ]);
 
-    bindSuccessfulRunMocks($defaultReviewer);
+    bindSuccessfulRunMocks($defaultReviewer, $assignee);
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
@@ -349,7 +349,7 @@ test('pull request review falls back to the task assignee when no default review
         'base_branch' => 'main',
     ]);
 
-    bindSuccessfulRunMocks($assignee);
+    bindSuccessfulRunMocks($assignee, $assignee);
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
@@ -396,6 +396,11 @@ test('pull request review uses task reviewer before project default reviewer', f
 });
 
 test('failed task can create a pull request from the latest ai run branch', function () {
+    $actor = User::factory()->create([
+        'email' => 'author@example.com',
+        'github_username' => 'author-login',
+        'github_token' => 'ghp_author_token',
+    ]);
     $assignee = User::factory()->create(['github_username' => 'assignee-login']);
     $defaultReviewer = User::factory()->create(['github_username' => 'reviewer-login']);
     $project = Project::create([
@@ -424,13 +429,18 @@ test('failed task can create a pull request from the latest ai run branch', func
         'base_branch' => 'main',
         'last_error' => 'Tests failed after retry limit reached.',
     ]);
+    $this->actingAs($actor);
 
     test()->instance(
         PullRequestProvider::class,
-        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($run, $defaultReviewer): void {
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($run, $actor, $defaultReviewer): void {
             $mock->shouldReceive('createPullRequest')
                 ->once()
-                ->with(Mockery::type(Task::class), Mockery::on(fn (AiRun $givenRun): bool => $givenRun->is($run)))
+                ->with(
+                    Mockery::type(Task::class),
+                    Mockery::on(fn (AiRun $givenRun): bool => $givenRun->is($run)),
+                    Mockery::on(fn (User $givenUser): bool => $givenUser->is($actor)),
+                )
                 ->andReturn(new PullRequestResult(
                     url: 'https://github.com/example/repo/pull/456',
                     number: 456,
@@ -440,6 +450,7 @@ test('failed task can create a pull request from the latest ai run branch', func
                 ->with(
                     'https://github.com/example/repo/pull/456',
                     Mockery::on(fn (User $user): bool => $user->is($defaultReviewer)),
+                    Mockery::on(fn (User $givenUser): bool => $givenUser->is($actor)),
                 );
             $mock->shouldReceive('getReviewState')->never();
         })
@@ -458,6 +469,92 @@ test('failed task can create a pull request from the latest ai run branch', func
         ->pull_request_url->toBe('https://github.com/example/repo/pull/456')
         ->pull_request_number->toBe(456)
         ->last_error->toBeNull();
+});
+
+test('manual pull request creation requires profile identity before changing run status', function () {
+    $actor = User::factory()->create(['github_username' => null]);
+    $task = Task::create([
+        'title' => 'Missing identity',
+        'description' => 'Manual PR creation requires a Git author.',
+        'acceptance_criteria' => [
+            ['body' => 'Manual PR is blocked without profile identity.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => 'ai-task-1-missing-identity',
+        'repository_path' => '/tmp/manual-pr',
+        'workspace_path' => '/tmp/manual-pr',
+    ]);
+    $this->actingAs($actor);
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    $this->post(route('tasks.create-pr', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'pull_request_identity' => 'Complete your profile email, GitHub username, and GitHub token before creating a pull request.',
+        ]);
+
+    expect($task->refresh()->status)
+        ->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)
+        ->toBe(AiRun::STATUS_FAILED);
+});
+
+test('manual pull request creation requires a saved github token before changing run status', function () {
+    $actor = User::factory()->create([
+        'email' => 'author@example.com',
+        'github_username' => 'author-login',
+        'github_token' => null,
+    ]);
+    $task = Task::create([
+        'title' => 'Missing token',
+        'description' => 'Manual PR creation requires a GitHub token.',
+        'acceptance_criteria' => [
+            ['body' => 'Manual PR is blocked without a token.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => 'ai-task-1-missing-token',
+        'repository_path' => '/tmp/manual-pr',
+        'workspace_path' => '/tmp/manual-pr',
+    ]);
+    $this->actingAs($actor);
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    $this->post(route('tasks.create-pr', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'pull_request_identity' => 'Complete your profile email, GitHub username, and GitHub token before creating a pull request.',
+        ]);
+
+    expect($task->refresh()->status)
+        ->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)
+        ->toBe(AiRun::STATUS_FAILED);
 });
 
 test('manual pull request creation requires a latest ai run branch', function () {
@@ -496,7 +593,7 @@ test('manual pull request creation requires a latest ai run branch', function ()
     expect($task->refresh()->status)->toBe(Task::STATUS_FAILED);
 });
 
-function bindSuccessfulRunMocks(User $expectedReviewer): void
+function bindSuccessfulRunMocks(User $expectedReviewer, ?User $expectedActor = null): void
 {
     test()->instance(
         CodingAgent::class,
@@ -514,9 +611,14 @@ function bindSuccessfulRunMocks(User $expectedReviewer): void
 
     test()->instance(
         PullRequestProvider::class,
-        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($expectedReviewer): void {
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($expectedReviewer, $expectedActor): void {
             $mock->shouldReceive('createPullRequest')
                 ->once()
+                ->with(
+                    Mockery::type(Task::class),
+                    Mockery::type(AiRun::class),
+                    $expectedActor === null ? null : Mockery::on(fn (User $user): bool => $user->is($expectedActor)),
+                )
                 ->andReturn(new PullRequestResult(
                     url: 'https://github.com/example/repo/pull/123',
                     number: 123,
@@ -526,6 +628,7 @@ function bindSuccessfulRunMocks(User $expectedReviewer): void
                 ->with(
                     'https://github.com/example/repo/pull/123',
                     Mockery::on(fn (User $user): bool => $user->is($expectedReviewer)),
+                    $expectedActor === null ? null : Mockery::on(fn (User $user): bool => $user->is($expectedActor)),
                 );
             $mock->shouldReceive('getReviewState')
                 ->never()

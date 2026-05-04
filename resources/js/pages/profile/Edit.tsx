@@ -20,6 +20,7 @@ export default function ProfileEdit() {
         name: user?.name ?? '',
         email: user?.email ?? '',
         github_username: user?.github_username ?? '',
+        github_token: '',
     });
 
     const passwordForm = useForm({
@@ -30,7 +31,9 @@ export default function ProfileEdit() {
 
     const submitProfile = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        profileForm.patch(profile.update.url());
+        profileForm.patch(profile.update.url(), {
+            onSuccess: () => profileForm.reset('github_token'),
+        });
     };
 
     const submitPassword = (event: FormEvent<HTMLFormElement>) => {
@@ -96,6 +99,32 @@ export default function ProfileEdit() {
                                 }
                             />
                         </Field>
+                        <Field
+                            label="GitHub token"
+                            error={profileForm.errors.github_token}
+                        >
+                            <Input
+                                type="password"
+                                autoComplete="off"
+                                value={profileForm.data.github_token}
+                                placeholder={
+                                    user?.has_github_token
+                                        ? 'Token saved'
+                                        : 'No token saved'
+                                }
+                                onChange={(event) =>
+                                    profileForm.setData(
+                                        'github_token',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                        </Field>
+                        <div className="rounded-md border border-hairline bg-surface-2 px-3 py-2 text-sm text-ink-muted">
+                            {user?.has_github_token
+                                ? 'GitHub token saved. Leave blank to keep it.'
+                                : 'No GitHub token saved. Enter a token to enable pull request creation.'}
+                        </div>
                         <div>
                             <Button
                                 type="submit"

@@ -14,12 +14,12 @@ use Symfony\Component\Process\Process;
 
 class GithubPullRequestProvider implements PullRequestProvider
 {
-    public function createPullRequest(Task $task, AiRun $run): PullRequestResult
+    public function createPullRequest(Task $task, AiRun $run, ?User $author = null): PullRequestResult
     {
         $body = $this->buildPrBody($task);
         $repositoryPath = $this->resolveRepositoryPath($run);
 
-        $this->commitPendingChanges($repositoryPath, $task);
+        $this->commitPendingChanges($repositoryPath, $task, $author);
 
         $result = $this->runProcess([
             'gh',
@@ -31,7 +31,7 @@ class GithubPullRequestProvider implements PullRequestProvider
             $body,
             '--head',
             $run->branch_name,
-        ], $repositoryPath);
+        ], $repositoryPath, $this->githubTokenEnvironment($author));
 
         if (! $result->isSuccessful()) {
             throw new Exception('gh pr create failed: '.trim((string) $result->getErrorOutput()));
@@ -50,7 +50,7 @@ class GithubPullRequestProvider implements PullRequestProvider
         );
     }
 
-    public function requestReview(string $pullRequestUrl, User $user): void
+    public function requestReview(string $pullRequestUrl, User $user, ?User $actor = null): void
     {
         if ($user->github_username === null || $user->github_username === '') {
             return;
@@ -63,7 +63,7 @@ class GithubPullRequestProvider implements PullRequestProvider
             $pullRequestUrl,
             '--add-reviewer',
             $user->github_username,
-        ], $this->resolveExecutionPath());
+        ], $this->resolveExecutionPath(), $this->githubTokenEnvironment($actor));
 
         if (! $result->isSuccessful()) {
             throw new Exception('gh pr review request failed: '.trim((string) $result->getErrorOutput()));
@@ -149,7 +149,7 @@ BODY;
         return (int) $matches[1];
     }
 
-    private function commitPendingChanges(string $path, Task $task): void
+    private function commitPendingChanges(string $path, Task $task, ?User $author): void
     {
         $status = $this->runProcess(['git', 'status', '--short'], $path);
         if (! $status->isSuccessful()) {
@@ -174,10 +174,45 @@ BODY;
             throw new Exception('Unable to inspect staged changes before pull request creation: '.trim((string) $diff->getErrorOutput()));
         }
 
-        $commit = $this->runProcess(['git', 'commit', '-m', $this->makeCommitMessage($task)], $path);
+        $commit = $this->runProcess(
+            ['git', 'commit', '-m', $this->makeCommitMessage($task)],
+            $path,
+            $this->gitAuthorEnvironment($author),
+        );
         if (! $commit->isSuccessful()) {
             throw new Exception('Unable to commit changes before pull request creation: '.trim((string) $commit->getErrorOutput()));
         }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function gitAuthorEnvironment(?User $author): array
+    {
+        if ($author === null || $author->github_username === null || $author->github_username === '' || $author->email === '') {
+            return [];
+        }
+
+        return [
+            'GIT_AUTHOR_NAME' => $author->github_username,
+            'GIT_AUTHOR_EMAIL' => $author->email,
+            'GIT_COMMITTER_NAME' => $author->github_username,
+            'GIT_COMMITTER_EMAIL' => $author->email,
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function githubTokenEnvironment(?User $user): array
+    {
+        if ($user === null || $user->github_token === null || $user->github_token === '') {
+            return [];
+        }
+
+        return [
+            'GH_TOKEN' => $user->github_token,
+        ];
     }
 
     private function makeCommitMessage(Task $task): string
@@ -201,9 +236,13 @@ BODY;
         return $run->workspace_path;
     }
 
-    private function runProcess(array $command, string $path): Process
+    /**
+     * @param  array<int, string>  $command
+     * @param  array<string, string>  $environment
+     */
+    private function runProcess(array $command, string $path, array $environment = []): Process
     {
-        $process = new Process($command, $path);
+        $process = new Process($command, $path, $environment);
         $process->setTimeout(null);
         $process->run();
 

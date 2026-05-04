@@ -44,9 +44,77 @@ test('manual task creation stores acceptance criteria on the task', function () 
     $task = Task::query()->sole();
 
     expect(Schema::hasTable('acceptance_criterias'))->toBeFalse()
+        ->and($task->status)->toBe(Task::STATUS_DRAFT)
         ->and($task->acceptance_criteria)->toBe([
             ['body' => 'Criteria are saved in tasks.acceptance_criteria.', 'checked' => false],
         ]);
+});
+
+test('manual task creation does not require a source input', function () {
+    $response = $this->post(route('tasks.store'), [
+        'title' => 'Create task without source',
+        'description' => 'Manual tasks do not need to come from an input source.',
+        'priority' => Task::PRIORITY_MEDIUM,
+        'deadline' => null,
+        'assignee_user_id' => null,
+        'acceptance_criteria' => [
+            ['body' => 'The task is created without source metadata.', 'checked' => false],
+        ],
+    ]);
+
+    $response->assertRedirect(route('tasks.index'));
+
+    expect(Task::query()->sole())
+        ->source_input_id->toBeNull()
+        ->title->toBe('Create task without source');
+});
+
+test('draft task can be submitted for approval', function () {
+    $approver = User::factory()->create();
+    $task = Task::create([
+        'title' => 'Ready for review',
+        'description' => 'Submit this draft for approval.',
+        'acceptance_criteria' => [
+            ['body' => 'The draft moves to pending approval.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_DRAFT,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'approved_by_user_id' => $approver->id,
+        'approved_at' => now(),
+        'rejected_at' => now(),
+    ]);
+
+    $response = $this->post(route('tasks.submit-for-approval', $task));
+
+    $response
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Task submitted for approval.');
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_PENDING_APPROVAL)
+        ->approved_by_user_id->toBeNull()
+        ->approved_at->toBeNull()
+        ->rejected_at->toBeNull();
+});
+
+test('non draft task cannot be submitted for approval', function () {
+    $task = Task::create([
+        'title' => 'Already waiting',
+        'description' => 'This task is already pending approval.',
+        'acceptance_criteria' => [
+            ['body' => 'The task status remains unchanged.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_PENDING_APPROVAL,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $response = $this->post(route('tasks.submit-for-approval', $task));
+
+    $response
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors('status');
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_PENDING_APPROVAL);
 });
 
 test('updating acceptance criteria stores the new criteria on the task', function () {
@@ -201,21 +269,34 @@ test('github pull request creation parses gh create url output', function () {
     $workspacePath = sys_get_temp_dir().'/task-fox-gh-workspace-'.uniqid();
     $binPath = sys_get_temp_dir().'/task-fox-gh-bin-'.uniqid();
     $argsPath = $binPath.'/args.txt';
+    $envPath = $binPath.'/env.txt';
+    $author = User::factory()->create([
+        'email' => 'commit-author@example.com',
+        'github_username' => 'commit-author',
+        'github_token' => 'ghp_author_token',
+    ]);
 
     mkdir($workspacePath);
     mkdir($binPath);
     runTaskAcceptanceProcess(['git', 'init', '-b', 'main'], $workspacePath);
-    runTaskAcceptanceProcess(['git', 'config', 'user.email', 'tests@example.com'], $workspacePath);
-    runTaskAcceptanceProcess(['git', 'config', 'user.name', 'Task Fox Tests'], $workspacePath);
     file_put_contents($workspacePath.'/README.md', "Initial content\n");
     runTaskAcceptanceProcess(['git', 'add', 'README.md'], $workspacePath);
-    runTaskAcceptanceProcess(['git', 'commit', '-m', 'Initial commit'], $workspacePath);
+    runTaskAcceptanceProcess([
+        'git',
+        '-c',
+        'user.email=bootstrap@example.com',
+        '-c',
+        'user.name=Bootstrap Author',
+        'commit',
+        '-m',
+        'Initial commit',
+    ], $workspacePath);
     runTaskAcceptanceProcess(['git', 'checkout', '-b', 'task/create-pr'], $workspacePath);
     file_put_contents($workspacePath.'/feature.txt', "Generated change\n");
 
     file_put_contents(
         $binPath.'/gh',
-        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '%s\n' 'https://github.com/example/repo/pull/456'\n"
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '%s\n' \"\${GH_TOKEN-unset}\" > ".escapeshellarg($envPath)."\nprintf '%s\n' 'https://github.com/example/repo/pull/456'\n"
     );
     chmod($binPath.'/gh', 0755);
 
@@ -237,24 +318,94 @@ test('github pull request creation parses gh create url output', function () {
     ]);
 
     $originalPath = getenv('PATH');
+    $originalGlobalConfig = getenv('GIT_CONFIG_GLOBAL');
     putenv('PATH='.$binPath.PATH_SEPARATOR.$originalPath);
+    putenv('GIT_CONFIG_GLOBAL=/dev/null');
+
+    try {
+        $result = (new GithubPullRequestProvider)->createPullRequest($task, $run, $author);
+    } finally {
+        putenv('PATH='.$originalPath);
+        putenv($originalGlobalConfig === false ? 'GIT_CONFIG_GLOBAL' : 'GIT_CONFIG_GLOBAL='.$originalGlobalConfig);
+    }
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+    $ghToken = trim((string) file_get_contents($envPath));
+    $commit = trim(runTaskAcceptanceProcess(['git', 'log', '-1', '--pretty=%s'], $workspacePath));
+    $commitAuthor = trim(runTaskAcceptanceProcess(['git', 'log', '-1', '--pretty=%an <%ae>'], $workspacePath));
+
+    expect($result)
+        ->url->toBe('https://github.com/example/repo/pull/456')
+        ->number->toBe(456)
+        ->and($ghToken)->toBe('ghp_author_token')
+        ->and($commit)->toBe('feat: complete task '.$task->id.' create-pr')
+        ->and($commitAuthor)->toBe('commit-author <commit-author@example.com>')
+        ->and($args)->toContain('pr')
+        ->and($args)->toContain('create')
+        ->and($args)->not->toContain('--json');
+});
+
+test('github pull request creation falls back to inherited gh auth without a token source', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-gh-fallback-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-gh-fallback-bin-'.uniqid();
+    $envPath = $binPath.'/env.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    runTaskAcceptanceProcess(['git', 'init', '-b', 'main'], $workspacePath);
+    file_put_contents($workspacePath.'/README.md', "Initial content\n");
+    runTaskAcceptanceProcess(['git', 'add', 'README.md'], $workspacePath);
+    runTaskAcceptanceProcess([
+        'git',
+        '-c',
+        'user.email=bootstrap@example.com',
+        '-c',
+        'user.name=Bootstrap Author',
+        'commit',
+        '-m',
+        'Initial commit',
+    ], $workspacePath);
+    runTaskAcceptanceProcess(['git', 'checkout', '-b', 'task/create-pr'], $workspacePath);
+
+    file_put_contents(
+        $binPath.'/gh',
+        "#!/bin/sh\nprintf '%s\n' \"\${GH_TOKEN-unset}\" > ".escapeshellarg($envPath)."\nprintf '%s\n' 'https://github.com/example/repo/pull/789'\n"
+    );
+    chmod($binPath.'/gh', 0755);
+
+    $task = Task::create([
+        'title' => 'Create PR without token',
+        'description' => 'Open the pull request.',
+        'acceptance_criteria' => [
+            ['body' => 'PR can be created with process auth.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_CREATING_PR,
+        'branch_name' => 'task/create-pr',
+        'repository_path' => $workspacePath,
+        'workspace_path' => $workspacePath,
+    ]);
+
+    $originalPath = getenv('PATH');
+    $originalToken = getenv('GH_TOKEN');
+    putenv('PATH='.$binPath.PATH_SEPARATOR.$originalPath);
+    putenv('GH_TOKEN');
 
     try {
         $result = (new GithubPullRequestProvider)->createPullRequest($task, $run);
     } finally {
         putenv('PATH='.$originalPath);
+        putenv($originalToken === false ? 'GH_TOKEN' : 'GH_TOKEN='.$originalToken);
     }
 
-    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
-    $commit = trim(runTaskAcceptanceProcess(['git', 'log', '-1', '--pretty=%s'], $workspacePath));
-
     expect($result)
-        ->url->toBe('https://github.com/example/repo/pull/456')
-        ->number->toBe(456)
-        ->and($commit)->toBe('feat: complete task '.$task->id.' create-pr')
-        ->and($args)->toContain('pr')
-        ->and($args)->toContain('create')
-        ->and($args)->not->toContain('--json');
+        ->url->toBe('https://github.com/example/repo/pull/789')
+        ->number->toBe(789)
+        ->and(trim((string) file_get_contents($envPath)))->toBe('unset');
 });
 
 test('codex agent prompt renders acceptance criteria from the task json column', function () {

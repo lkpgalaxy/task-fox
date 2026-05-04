@@ -32,6 +32,7 @@ class UpdateProfileRequest extends FormRequest
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'string', 'lowercase', 'email', 'max:255', Rule::unique('users', 'email')->ignore($userId)],
             'github_username' => ['nullable', 'string', 'max:255', Rule::unique('users', 'github_username')->ignore($userId)],
+            'github_token' => ['nullable', 'string', 'max:512'],
         ];
     }
 }

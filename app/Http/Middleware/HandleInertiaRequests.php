@@ -40,8 +40,14 @@ class HandleInertiaRequests extends Middleware
             'name' => config('app.name'),
             'auth' => [
                 'user' => $request->user()
-                    ? $request->user()->only(['id', 'name', 'email', 'github_username', 'role', 'disabled_at'])
+                    ? [
+                        ...$request->user()->only(['id', 'name', 'email', 'github_username', 'role', 'disabled_at']),
+                        'has_github_token' => $request->user()->github_token !== null && $request->user()->github_token !== '',
+                    ]
                     : null,
+            ],
+            'flash' => [
+                'status' => $request->session()->get('status'),
             ],
         ];
     }

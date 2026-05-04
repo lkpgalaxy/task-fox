@@ -16,7 +16,9 @@ import {
 } from '@/components/ui';
 import { UploadSourceAction } from '@/components/upload-source-modal';
 import { cn } from '@/lib/utils';
+import profile from '@/routes/profile';
 import tasks from '@/routes/tasks';
+import type { Auth } from '@/types';
 
 type Criterion = {
     body: string;
@@ -130,6 +132,7 @@ type ProjectSummary = {
 };
 
 type IndexPageProps = {
+    auth: Auth;
     tasks: TaskRecord[];
     users: User[];
     sourceInputs: SourceInput[];
@@ -221,10 +224,14 @@ export default function TasksIndex() {
         priorities,
         flash,
         errors,
+        auth,
     } = page.props;
 
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
+    const [showPrIdentityModal, setShowPrIdentityModal] = useState(false);
+    const [dismissedPrIdentityError, setDismissedPrIdentityError] =
+        useState(false);
     const [editingTask, setEditingTask] = useState<TaskRecord | null>(null);
 
     const defaultPriority = priorities.includes('medium')
@@ -437,6 +444,17 @@ export default function TasksIndex() {
         );
     };
 
+    const submitForApproval = (taskId: number) => {
+        router.post(
+            tasks.submitForApproval.url(taskId),
+            {},
+            {
+                preserveScroll: true,
+                onSuccess: () => openTaskDetails(taskId),
+            },
+        );
+    };
+
     const submitReject = (taskId: number) => {
         router.post(
             tasks.reject.url(taskId),
@@ -460,6 +478,19 @@ export default function TasksIndex() {
     };
 
     const submitCreatePr = (taskId: number) => {
+        if (
+            !auth.user?.email ||
+            auth.user.email.trim() === '' ||
+            !auth.user.github_username ||
+            auth.user.github_username.trim() === '' ||
+            !auth.user.has_github_token
+        ) {
+            setDismissedPrIdentityError(false);
+            setShowPrIdentityModal(true);
+
+            return;
+        }
+
         router.post(
             tasks.createPr.url(taskId),
             {},
@@ -468,6 +499,14 @@ export default function TasksIndex() {
                 onSuccess: () => openTaskDetails(taskId),
             },
         );
+    };
+    const hasPrIdentityError = Boolean(errors?.pull_request_identity);
+    const prIdentityModalOpen =
+        showPrIdentityModal ||
+        (hasPrIdentityError && !dismissedPrIdentityError);
+    const closePrIdentityModal = () => {
+        setShowPrIdentityModal(false);
+        setDismissedPrIdentityError(true);
     };
 
     const submitRefreshPr = (taskId: number) => {
@@ -576,6 +615,7 @@ export default function TasksIndex() {
                     sourceInputs={sourceInputs}
                     projects={projectOptions}
                     priorities={priorities}
+                    showSourceInput={false}
                     onAddCriterion={() =>
                         addCriterion(createForm.setData, createForm.data)
                     }
@@ -638,6 +678,9 @@ export default function TasksIndex() {
                     <TaskDetails
                         task={selectedTask}
                         onEdit={() => startEdit(selectedTask)}
+                        onSubmitForApproval={() =>
+                            submitForApproval(selectedTask.id)
+                        }
                         onApprove={() => submitApprove(selectedTask.id)}
                         onReject={() => submitReject(selectedTask.id)}
                         onRetry={() => submitRetry(selectedTask.id)}
@@ -645,6 +688,33 @@ export default function TasksIndex() {
                         onRefreshPr={() => submitRefreshPr(selectedTask.id)}
                     />
                 ) : null}
+            </Modal>
+
+            <Modal
+                show={prIdentityModalOpen}
+                onClose={closePrIdentityModal}
+                title="Complete profile before creating a PR"
+                size="md"
+            >
+                <div className="grid gap-4">
+                    <p className="text-sm leading-6 text-ink-muted">
+                        Task Fox needs your profile email and GitHub username to
+                        author the commit, plus a saved GitHub token to open the
+                        pull request.
+                    </p>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={closePrIdentityModal}
+                        >
+                            Close
+                        </Button>
+                        <ActionLink variant="primary" href={profile.edit.url()}>
+                            Complete profile
+                        </ActionLink>
+                    </div>
+                </div>
             </Modal>
         </AppShell>
     );
@@ -692,6 +762,7 @@ function TaskCard({
 function TaskDetails({
     task,
     onEdit,
+    onSubmitForApproval,
     onApprove,
     onReject,
     onRetry,
@@ -700,6 +771,7 @@ function TaskDetails({
 }: {
     task: TaskRecord;
     onEdit: () => void;
+    onSubmitForApproval: () => void;
     onApprove: () => void;
     onReject: () => void;
     onRetry: () => void;
@@ -739,6 +811,15 @@ function TaskDetails({
                     <Button type="button" onClick={onEdit}>
                         Edit
                     </Button>
+                    {task.status === 'draft' ? (
+                        <Button
+                            type="button"
+                            variant="primary"
+                            onClick={onSubmitForApproval}
+                        >
+                            Submit for approval
+                        </Button>
+                    ) : null}
                     {task.status === 'pending_approval' ? (
                         <Button
                             type="button"
@@ -1004,6 +1085,7 @@ function TaskFormFields({
     sourceInputs,
     projects,
     priorities,
+    showSourceInput = true,
     onAddCriterion,
     onRemoveCriterion,
     onUpdateCriterion,
@@ -1020,6 +1102,7 @@ function TaskFormFields({
     sourceInputs: SourceInput[];
     projects: ProjectSummary[];
     priorities: string[];
+    showSourceInput?: boolean;
     onAddCriterion: () => void;
     onRemoveCriterion: (index: number) => void;
     onUpdateCriterion: (index: number, patch: Partial<Criterion>) => void;
@@ -1155,24 +1238,26 @@ function TaskFormFields({
                 </Select>
             </Field>
 
-            <Field
-                label="Source input"
-                error={formatError(form.errors.source_input_id)}
-            >
-                <Select
-                    value={form.data.source_input_id}
-                    onChange={(event) =>
-                        form.setData('source_input_id', event.target.value)
-                    }
+            {showSourceInput ? (
+                <Field
+                    label="Source input"
+                    error={formatError(form.errors.source_input_id)}
                 >
-                    <option value="">None</option>
-                    {sourceInputs.map((sourceInput) => (
-                        <option key={sourceInput.id} value={sourceInput.id}>
-                            {sourceInput.title}
-                        </option>
-                    ))}
-                </Select>
-            </Field>
+                    <Select
+                        value={form.data.source_input_id}
+                        onChange={(event) =>
+                            form.setData('source_input_id', event.target.value)
+                        }
+                    >
+                        <option value="">None</option>
+                        {sourceInputs.map((sourceInput) => (
+                            <option key={sourceInput.id} value={sourceInput.id}>
+                                {sourceInput.title}
+                            </option>
+                        ))}
+                    </Select>
+                </Field>
+            ) : null}
 
             <div className="space-y-2">
                 <div className="flex items-center justify-between">
