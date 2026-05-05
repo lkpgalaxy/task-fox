@@ -764,7 +764,8 @@ test('codex coding agent uses the run workspace as codex workspace and process c
 
     expect($result->successful)->toBeTrue()
         ->and($result->context['command'])->toContain('exec')
-        ->and($result->context['command'])->toContain('[prompt omitted]')
+        ->and($result->context['command'])->not->toContain('[prompt omitted]')
+        ->and($result->context['command'][array_key_last($result->context['command'])])->toContain('Implement task '.$task->id.': Implement in workspace'.PHP_EOL.PHP_EOL.'Description:')
         ->and(trim((string) file_get_contents($cwdPath)))->toBe($workspacePath)
         ->and($args)->toContain('exec')
         ->and($args)->toContain('--model')
@@ -905,6 +906,14 @@ test('codex review command uses native base branch review mode', function () {
         ->and($command)->toContain('--output-last-message')
         ->and($command)->not->toContain('--uncommitted')
         ->and($command)->not->toContain('Return exactly one JSON object with this shape:');
+});
+
+test('codex review classifier treats no blocking issues as passing', function () {
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('reviewTextHasFindings');
+
+    expect($method->invoke(new CodexCodingAgent, 'There are no blocking issues in scope of this patch.'))
+        ->toBeFalse();
 });
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
@@ -1495,13 +1504,13 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
                     successful: true,
                     messages: ['Coding agent planning command completed.'],
                     payload: ['plan' => 'Log every agent phase.'],
-                    context: ['command' => ['codex', 'exec', '[prompt omitted]']],
+                    context: ['command' => ['codex', 'exec', 'Planning prompt']],
                 ));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(
                     successful: true,
-                    context: ['command' => ['codex', 'exec', '[prompt omitted]']],
+                    context: ['command' => ['codex', 'exec', 'Implementation prompt']],
                 ));
             $mock->shouldReceive('reviewChanges')
                 ->twice()
@@ -1556,8 +1565,8 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
 
     $expectAgentContext($planningStartedContext, 'plan', 'gpt-plan', 'low');
     $expectAgentContext($invocationStartedContext, 'implement', 'gpt-implement', 'medium');
-    expect($planningStartedContext['command'])->toBe(['codex', 'exec', '[prompt omitted]'])
-        ->and($invocationStartedContext['command'])->toBe(['codex', 'exec', '[prompt omitted]']);
+    expect($planningStartedContext['command'])->toBe(['codex', 'exec', 'Planning prompt'])
+        ->and($invocationStartedContext['command'])->toBe(['codex', 'exec', 'Implementation prompt']);
     $logsByMessage->get('Coding agent review started')->each(
         fn (TaskRunLog $log) => $expectAgentContext($log->context, 'review', 'gpt-review', 'high'),
     );
@@ -1570,7 +1579,7 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
         ->where('context->message', 'Coding agent planning command completed.')
         ->sole()
         ->context)->toMatchArray([
-            'command' => ['codex', 'exec', '[prompt omitted]'],
+            'command' => ['codex', 'exec', 'Planning prompt'],
         ]);
 });
 
@@ -1677,12 +1686,12 @@ test('RunApprovedTaskWithCodingAgentJob fails when the review fixer fails before
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
-test('RunApprovedTaskWithCodingAgentJob fails when tests fail after a review fix', function () {
+test('RunApprovedTaskWithCodingAgentJob keeps fixing when tests fail after a review fix', function () {
     Queue::fake();
 
     $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Tests fail after fix');
-    $run = createAutomationRun($task, $repositoryPath, 'task/tests-fail-after-fix');
+    $task = createApprovedAutomationTask($repositoryPath, 'Retry tests after fix');
+    $run = createAutomationRun($task, $repositoryPath, 'task/retry-tests-after-fix');
     $testsCountPath = $repositoryPath.'/tests-count.txt';
     config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 2)]);
 
@@ -1696,40 +1705,42 @@ test('RunApprovedTaskWithCodingAgentJob fails when tests fail after a review fix
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
-                ->once()
-                ->andReturn(new CodingAgentResult(
-                    successful: false,
-                    messages: ['review output'],
-                    error: 'Needs fixes.',
-                    payload: ['findings' => [['title' => '[P2] Missing test']]],
-                ));
+                ->twice()
+                ->andReturn(
+                    new CodingAgentResult(
+                        successful: false,
+                        messages: ['review output'],
+                        error: 'Needs fixes.',
+                        payload: ['findings' => [['title' => '[P2] Missing test']]],
+                    ),
+                    new CodingAgentResult(successful: true),
+                );
             $mock->shouldReceive('fixReviewFindings')
-                ->once()
+                ->twice()
+                ->with(
+                    Mockery::type(Task::class),
+                    Mockery::type(TaskRun::class),
+                    Mockery::type('string'),
+                    Mockery::any(),
+                )
                 ->andReturn(new CodingAgentResult(successful: true, messages: ['fixed']));
-            $mock->shouldReceive('generateCommitMessage')->never();
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: retry review fix tests']));
         })
     );
-    test()->instance(
-        ExternalTaskProvider::class,
-        Mockery::mock(ExternalTaskProvider::class)
-    );
-    test()->instance(
-        PullRequestProvider::class,
-        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
-            $mock->shouldReceive('createPullRequest')->never();
-            $mock->shouldReceive('requestReview')->never();
-            $mock->shouldReceive('getReviewState')->never();
-        })
-    );
+    bindSuccessfulAuxiliaryMocks();
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
     expect($run->refresh())
-        ->status->toBe(TaskRun::STATUS_FAILED)
-        ->last_error->toBe('Tests failed after review fix.')
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING)
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
+        ->last_error->toBeNull()
+        ->review_attempt_count->toBe(3)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->logs()->where('message', 'Tests failed after review fix; retrying')->exists())->toBeTrue()
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('3');
 });
 
 test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git commit', function () {

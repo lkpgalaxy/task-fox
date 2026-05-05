@@ -258,6 +258,7 @@ class CodexCodingAgent implements CodingAgent
             'no findings',
             'no issues found',
             'no actionable findings',
+            'no blocking issues',
             'no discrete correctness issues',
             'patch is correct',
         ] as $passingPhrase) {
@@ -698,12 +699,7 @@ PAYLOAD;
     private function commandLogContext(array $command): array
     {
         return [
-            'command' => array_map(
-                static fn (string $argument): string => str_contains($argument, "\n") || mb_strlen($argument) > 500
-                    ? '[prompt omitted]'
-                    : $argument,
-                $command,
-            ),
+            'command' => $command,
         ];
     }
 

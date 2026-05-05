@@ -472,6 +472,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run, string $repositoryPath): void
     {
         $retryLimit = $this->retryLimit($run);
+        $reviewFeedback = null;
+        $testFailure = null;
 
         for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
             $run->markCheckpointRunning(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
@@ -480,42 +482,44 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'review_attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_CHANGES_REVIEWED),
             ]);
 
-            $this->log($run, 'info', 'Coding agent review started', array_merge(
-                $this->agentLogContext($run, 'review'),
-                ['attempt' => $attempt],
-            ));
+            if ($reviewFeedback === null) {
+                $this->log($run, 'info', 'Coding agent review started', array_merge(
+                    $this->agentLogContext($run, 'review'),
+                    ['attempt' => $attempt],
+                ));
 
-            $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
-            $this->logAgentMessages($run, $agentResult);
+                $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
+                $this->logAgentMessages($run, $agentResult);
 
-            if ($agentResult->successful) {
-                $this->log($run, 'info', 'Coding agent review passed', [
+                if ($agentResult->successful) {
+                    $this->log($run, 'info', 'Coding agent review passed', [
+                        'attempt' => $attempt,
+                    ]);
+
+                    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+
+                    return;
+                }
+
+                if (! $this->allowsRetry($attempt, $retryLimit)) {
+                    $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
+                        'max_attempts' => $this->retryLimitLabel($retryLimit),
+                        'error' => $agentResult->error,
+                    ]);
+
+                    $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+
+                    return;
+                }
+
+                $reviewFeedback = $this->buildReviewFeedback($agentResult);
+
+                $this->log($run, 'warning', 'Coding agent review failed', [
                     'attempt' => $attempt,
-                ]);
-
-                $run->markCheckpointCompleted(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
-
-                return;
-            }
-
-            if (! $this->allowsRetry($attempt, $retryLimit)) {
-                $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
                     'max_attempts' => $this->retryLimitLabel($retryLimit),
                     'error' => $agentResult->error,
                 ]);
-
-                $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
-
-                return;
             }
-
-            $reviewFeedback = $this->buildReviewFeedback($agentResult);
-
-            $this->log($run, 'warning', 'Coding agent review failed', [
-                'attempt' => $attempt,
-                'max_attempts' => $this->retryLimitLabel($retryLimit),
-                'error' => $agentResult->error,
-            ]);
 
             $this->log($run, 'info', 'Coding agent review fix started', array_merge(
                 $this->agentLogContext($run, 'review_fix'),
@@ -534,8 +538,26 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             ]);
 
             if (! $this->runTests($repositoryPath, $run)) {
-                throw new Exception('Tests failed after review fix.');
+                $testFailure = trim((string) $run->refresh()->last_error);
+
+                $this->log($run, 'warning', 'Tests failed after review fix; retrying', [
+                    'attempt' => $attempt,
+                    'max_attempts' => $this->retryLimitLabel($retryLimit),
+                    'error' => $testFailure,
+                ]);
+
+                $reviewFeedback = $this->reviewFixTestFailureFeedback($testFailure);
+
+                continue;
             }
+
+            $reviewFeedback = null;
+        }
+
+        if ($reviewFeedback !== null) {
+            throw new Exception($testFailure !== null && $testFailure !== ''
+                ? "Tests failed after review fix.\n\n{$testFailure}"
+                : 'Tests failed after review fix.');
         }
 
         $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
@@ -546,6 +568,15 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $retryLimit = $run->retry_limit ?? (int) config('automation.agent.retry_limit', 3);
 
         return $retryLimit === -1 || $retryLimit > 0 ? $retryLimit : 1;
+    }
+
+    private function reviewFixTestFailureFeedback(string $testFailure): string
+    {
+        $testFailure = trim($testFailure);
+
+        return $testFailure !== ''
+            ? "Tests failed after review fix.\n\n{$testFailure}"
+            : 'Tests failed after review fix.';
     }
 
     private function allowsAttempt(int $attempt, int $retryLimit): bool
