@@ -327,6 +327,7 @@ test('github pull request creation parses gh create url output', function () {
         'status' => TaskRun::STATUS_CREATING_PR,
         'branch_name' => 'task/create-pr',
         'workspace_path' => $workspacePath,
+        'base_branch' => 'staging',
     ]);
 
     $originalPath = getenv('PATH');
@@ -354,6 +355,10 @@ test('github pull request creation parses gh create url output', function () {
         ->and($commitAuthor)->toBe('Bootstrap Author <bootstrap@example.com>')
         ->and($args)->toContain('pr')
         ->and($args)->toContain('create')
+        ->and($args)->toContain('--head')
+        ->and($args[array_search('--head', $args, true) + 1])->toBe('task/create-pr')
+        ->and($args)->toContain('--base')
+        ->and($args[array_search('--base', $args, true) + 1])->toBe('staging')
         ->and($args)->not->toContain('--json');
 });
 
@@ -528,8 +533,6 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Acceptance-criteria-driven workflow:')
         ->toContain('Stored implementation plan:')
         ->toContain('Inspect the workflow and update the implementation.')
-        ->toContain('Project URL for frontend screenshots:')
-        ->toContain('https://workflow.test')
         ->toContain('Follow the stored implementation plan above as the implementation contract for this run.')
         ->toContain('Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.')
         ->toContain('1. [ ] List criteria before implementation.')
@@ -540,17 +543,47 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('pause and ask for clarification before implementation')
         ->toContain('Pest feature/unit tests so each acceptance criterion has direct coverage')
         ->toContain('run TypeScript/lint checks for React/Inertia changes')
-        ->toContain('with Playwright, and capture a screenshot of the implemented result')
-        ->toContain('open the project URL above or the relevant page under it with Playwright')
-        ->toContain(storage_path("app/task-runs/{$run->id}/screenshots/implementation.png"))
-        ->toContain('Create the screenshot directory if it does not exist')
-        ->toContain('include the screenshot path in your final response when a screenshot was captured')
-        ->toContain('Do not start the application or dev server for screenshots; use the configured project URL')
+        ->toContain('screenshot verification runs in a separate workflow step')
         ->toContain('vendor/bin/pint --dirty --format agent')
         ->toContain('php artisan test --compact')
         ->toContain('Fix failing tests instead of ignoring them')
         ->toContain('explicitly mark every verified criterion as [x]')
         ->toContain('Final response must include the acceptance-criteria checklist, tests run, and whether they passed');
+});
+
+test('codex screenshot prompt uses the configured project url and screenshot path', function () {
+    $project = Project::create([
+        'name' => 'Screenshot App',
+        'workspace_path' => '/tmp/screenshot-app',
+        'url' => 'https://screenshot.test',
+    ]);
+    $task = Task::create([
+        'title' => 'Verify screenshot',
+        'description' => 'Capture the implemented page.',
+        'acceptance_criteria' => [
+            ['body' => 'Screenshot is captured.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_SCREENSHOTTING,
+        'branch_name' => 'task/screenshot',
+    ]);
+
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('buildScreenshotPrompt');
+    $prompt = $method->invoke(new CodexCodingAgent, $task, $run);
+
+    expect($prompt)
+        ->toContain('Capture a verification screenshot for task '.$task->id)
+        ->toContain('https://screenshot.test')
+        ->toContain(storage_path("app/task-runs/{$run->id}/screenshots/implementation.png"))
+        ->toContain('Use Playwright browser tooling')
+        ->toContain('Do not start the application server or Vite dev server')
+        ->toContain('return a clear failure reason');
 });
 
 test('codex review command uses native review mode and accepts passing text output', function () {
@@ -656,6 +689,44 @@ test('codex review command omits the model flag when no review model is configur
     expect($result->successful)->toBeTrue()
         ->and($args)->not->toContain('--model')
         ->and($args)->not->toContain('-c');
+});
+
+test('codex review command treats no discrete correctness issues as passing', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-no-issues-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-no-issues-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    createCodexReviewStub(
+        $binPath,
+        $argsPath,
+        'No discrete correctness issues were found in the reviewed changes. The stylesheet builds successfully and the test suite passes.',
+    );
+
+    $task = Task::create([
+        'title' => 'Review no discrete issues',
+        'description' => 'Review should pass when Codex reports no correctness issues.',
+        'acceptance_criteria' => [
+            ['body' => 'No correctness issues passes review.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-no-issues',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->reviewChanges($task, $run, 1);
+
+    expect($result->successful)->toBeTrue()
+        ->and($result->payload['review_text'])->toContain('No discrete correctness issues');
 });
 
 test('codex review command surfaces findings as a failed review result', function () {

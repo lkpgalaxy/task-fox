@@ -231,6 +231,18 @@ class CodexCodingAgent implements CodingAgent
         }
     }
 
+    public function captureScreenshot(Task $task, TaskRun $run): CodingAgentResult
+    {
+        return $this->executeTaskCommand(
+            $task,
+            $run,
+            $this->buildScreenshotPrompt($task, $run),
+            'Screenshot verification command completed.',
+            $this->resolveRunSetting($run, 'implement_model'),
+            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+        );
+    }
+
     private function reviewTextHasFindings(string $output): bool
     {
         $normalizedOutput = mb_strtolower(trim($output));
@@ -239,7 +251,13 @@ class CodexCodingAgent implements CodingAgent
             return false;
         }
 
-        foreach (['no findings', 'no issues found', 'no actionable findings', 'patch is correct'] as $passingPhrase) {
+        foreach ([
+            'no findings',
+            'no issues found',
+            'no actionable findings',
+            'no discrete correctness issues',
+            'patch is correct',
+        ] as $passingPhrase) {
             if (str_contains($normalizedOutput, $passingPhrase)) {
                 return false;
             }
@@ -307,9 +325,6 @@ class CodexCodingAgent implements CodingAgent
                     return ($index + 1).". {$status} {$criterion['body']}";
                 })
                 ->join("\n");
-        $screenshotPath = storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
-        $projectUrl = trim((string) $task->project?->url);
-        $projectUrl = $projectUrl !== '' ? $projectUrl : 'No project URL configured; skip Playwright screenshot capture unless a reachable project URL is available from task context.';
 
         return <<<PROMPT
 Implement task {$task->id}: {$task->title}
@@ -323,9 +338,6 @@ Acceptance criteria:
 Stored implementation plan:
 {$planBlock}
 
-Project URL for frontend screenshots:
-{$projectUrl}
-
 Plan-following instructions:
 - Follow the stored implementation plan above as the implementation contract for this run.
 - Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.
@@ -336,13 +348,37 @@ Acceptance-criteria-driven workflow:
 3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
 4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
 5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
-6. For frontend behavior, add backend assertions where possible, run TypeScript/lint checks for React/Inertia changes, open the project URL above or the relevant page under it with Playwright, and capture a screenshot of the implemented result at this absolute path outside the repository: {$screenshotPath}
-7. Create the screenshot directory if it does not exist, and include the screenshot path in your final response when a screenshot was captured.
-8. Do not start the application or dev server for screenshots; use the configured project URL.
-9. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
-10. Fix failing tests instead of ignoring them.
-11. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
-12. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
+7. Do not start the application or dev server for screenshots; screenshot verification runs in a separate workflow step.
+8. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+9. Fix failing tests instead of ignoring them.
+10. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
+11. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+PROMPT;
+    }
+
+    private function buildScreenshotPrompt(Task $task, TaskRun $run): string
+    {
+        $projectUrl = trim((string) $task->project?->url);
+        $screenshotPath = storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
+
+        return <<<PROMPT
+Capture a verification screenshot for task {$task->id}: {$task->title}
+
+Project URL:
+{$projectUrl}
+
+Screenshot path:
+{$screenshotPath}
+
+Instructions:
+1. Use Playwright browser tooling to open the project URL or the most relevant page under it for this task.
+2. Wait for the page to finish rendering.
+3. Capture a screenshot of the implemented result and save it exactly at the screenshot path above.
+4. Create the screenshot directory if it does not exist.
+5. Do not start the application server or Vite dev server; use the configured project URL.
+6. If the URL is unreachable or screenshot capture is impossible, return a clear failure reason.
+7. Final response must include the screenshot path when captured.
 PROMPT;
     }
 

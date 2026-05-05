@@ -297,6 +297,11 @@ export default function TasksIndex() {
         useState(false);
     const [editingTask, setEditingTask] = useState<TaskRecord | null>(null);
 
+    usePoll(10000, {
+        only: ['tasks', 'selectedTask'],
+        preserveErrors: true,
+    });
+
     const defaultPriority = priorities.includes('medium')
         ? 'medium'
         : (priorities[0] ?? 'medium');
@@ -761,7 +766,6 @@ export default function TasksIndex() {
             >
                 {selectedTask && !showEditModal ? (
                     <>
-                        <TaskDetailsPoller />
                         <TaskDetails
                             task={selectedTask}
                             onEdit={() => startEdit(selectedTask)}
@@ -843,15 +847,6 @@ export default function TasksIndex() {
             </Modal>
         </AppShell>
     );
-}
-
-function TaskDetailsPoller() {
-    usePoll(5000, {
-        only: ['selectedTask'],
-        preserveErrors: true,
-    });
-
-    return null;
 }
 
 function TaskCard({

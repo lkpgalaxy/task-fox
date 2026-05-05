@@ -4,6 +4,7 @@ namespace App\Services\PullRequests;
 
 use App\Contracts\PullRequestProvider;
 use App\Enums\PullRequestReviewState;
+use App\Jobs\DispatchNextTaskRunJob;
 use App\Models\Task;
 use App\Models\TaskRun;
 use RuntimeException;
@@ -29,6 +30,8 @@ class PullRequestStatusRefresher
             $task->update(['status' => Task::STATUS_DONE]);
 
             $run->update(['status' => TaskRun::STATUS_DONE, 'finished_at' => now()]);
+
+            DispatchNextTaskRunJob::dispatch();
         }
 
         return $state;

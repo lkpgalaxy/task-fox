@@ -44,6 +44,8 @@ class TaskRun extends Model
 
     public const CHECKPOINT_IMPLEMENTATION_VERIFIED = 'implementation_verified';
 
+    public const CHECKPOINT_SCREENSHOT_VERIFIED = 'screenshot_verified';
+
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
 
     public const CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED = 'acceptance_criteria_verified';
@@ -76,6 +78,8 @@ class TaskRun extends Model
 
     public const STATUS_TESTING = 'testing';
 
+    public const STATUS_SCREENSHOTTING = 'screenshotting';
+
     public const STATUS_REVIEWING_CHANGES = 'reviewing_changes';
 
     public const STATUS_GENERATING_COMMIT_MESSAGE = 'generating_commit_message';
@@ -96,6 +100,7 @@ class TaskRun extends Model
         self::STATUS_PLANNING,
         self::STATUS_IMPLEMENTING,
         self::STATUS_TESTING,
+        self::STATUS_SCREENSHOTTING,
         self::STATUS_REVIEWING_CHANGES,
         self::STATUS_GENERATING_COMMIT_MESSAGE,
         self::STATUS_COMMITTING_CHANGES,
@@ -107,6 +112,7 @@ class TaskRun extends Model
         self::CHECKPOINT_REPOSITORY_PREPARED,
         self::CHECKPOINT_PLANNED,
         self::CHECKPOINT_IMPLEMENTATION_VERIFIED,
+        self::CHECKPOINT_SCREENSHOT_VERIFIED,
         self::CHECKPOINT_CHANGES_REVIEWED,
         self::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         self::CHECKPOINT_CHANGES_COMMITTED,

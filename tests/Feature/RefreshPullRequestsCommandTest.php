@@ -2,14 +2,18 @@
 
 use App\Contracts\PullRequestProvider;
 use App\Enums\PullRequestReviewState;
+use App\Jobs\DispatchNextTaskRunJob;
 use App\Models\Task;
 use App\Models\TaskRun;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Mockery\MockInterface;
 
 uses(RefreshDatabase::class);
 
 test('scheduled pull request refresh marks merged pull requests as done', function () {
+    Queue::fake();
+
     $task = Task::create([
         'title' => 'Refresh scheduled PR',
         'description' => 'Scheduler refreshes the latest PR-bearing run.',
@@ -50,6 +54,8 @@ test('scheduled pull request refresh marks merged pull requests as done', functi
     expect($task->refresh()->status)->toBe(Task::STATUS_DONE)
         ->and($pullRequestRun->refresh()->status)->toBe(TaskRun::STATUS_DONE)
         ->and($pullRequestRun->finished_at)->not->toBeNull();
+
+    Queue::assertPushed(DispatchNextTaskRunJob::class);
 });
 
 test('scheduled pull request refresh ignores tasks that are not waiting on pull requests', function () {

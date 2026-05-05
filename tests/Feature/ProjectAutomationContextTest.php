@@ -1183,6 +1183,7 @@ test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria
             TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
             TaskRun::CHECKPOINT_PLANNED,
             TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
+            TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_REVIEWED,
             TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_COMMITTED,
@@ -1196,6 +1197,65 @@ test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria
         ->and(array_search('Acceptance criteria verified', $logMessages, true))->toBeLessThan(
             array_search('Coding agent commit message generation started', $logMessages, true),
         );
+});
+
+test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when project URL is configured', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $events = [];
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Screenshot before review', null, 'https://app.test');
+    $run = createAutomationRun($task, $repositoryPath, 'task/screenshot-before-review');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use (&$events, $run): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'planning';
+
+                    return new CodingAgentResult(successful: true, payload: ['plan' => 'Implement before screenshot.']);
+                });
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'implementation';
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('captureScreenshot')
+                ->once()
+                ->andReturnUsing(function () use (&$events, $run): CodingAgentResult {
+                    $events[] = 'screenshot';
+                    file_put_contents(storage_path("app/task-runs/{$run->id}/screenshots/implementation.png"), 'png');
+
+                    return new CodingAgentResult(successful: true, messages: ['screenshot captured']);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'review';
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'commit-message';
+
+                    return new CodingAgentResult(successful: true, payload: ['message' => 'test: screenshot step']);
+                });
+        })
+    );
+    bindSuccessfulAuxiliaryMocks($events);
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($events)->toBe(['planning', 'implementation', 'screenshot', 'review', 'commit-message', 'pull-request'])
+        ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->logs()->where('message', 'Screenshot captured')->exists())->toBeTrue();
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
@@ -1709,6 +1769,7 @@ test('task run workflow initializes planning before implementation verification'
         TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
         TaskRun::CHECKPOINT_PLANNED,
         TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
+        TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_REVIEWED,
         TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_COMMITTED,
@@ -2375,11 +2436,12 @@ function bindSuccessfulAuxiliaryMocks(?array &$events = null, ?string $repositor
     );
 }
 
-function createApprovedAutomationTask(string $repositoryPath, string $title, ?User $assignee = null): Task
+function createApprovedAutomationTask(string $repositoryPath, string $title, ?User $assignee = null, ?string $projectUrl = null): Task
 {
     $project = Project::create([
         'name' => $title,
         'workspace_path' => $repositoryPath,
+        'url' => $projectUrl,
     ]);
 
     return Task::create([

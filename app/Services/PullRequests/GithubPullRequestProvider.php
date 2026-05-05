@@ -30,6 +30,8 @@ class GithubPullRequestProvider implements PullRequestProvider
             $body,
             '--head',
             $run->branch_name,
+            '--base',
+            $this->resolveBaseBranch($run),
         ], $repositoryPath, $this->githubTokenEnvironment($author));
 
         if (! $result->isSuccessful()) {
@@ -196,6 +198,13 @@ BODY;
     private function resolveRepositoryPath(TaskRun $run): string
     {
         return $this->resolveExecutionPath($run->workspace_path);
+    }
+
+    private function resolveBaseBranch(TaskRun $run): string
+    {
+        $baseBranch = trim((string) $run->base_branch);
+
+        return $baseBranch === '' ? 'main' : $baseBranch;
     }
 
     /**

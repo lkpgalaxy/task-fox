@@ -74,6 +74,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
+                    TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED => $this->verifyScreenshot($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run, $repositoryPath),
                     TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED => $this->verifyAcceptanceCriteria($task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
@@ -249,6 +250,55 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED);
     }
 
+    private function verifyScreenshot(CodingAgent $codingAgent, Task $task, TaskRun $run): void
+    {
+        $run->markCheckpointRunning(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
+        $run->update(['status' => TaskRun::STATUS_SCREENSHOTTING]);
+
+        $projectUrl = trim((string) $task->project?->url);
+        if ($projectUrl === '') {
+            $this->log($run, 'info', 'Screenshot verification skipped', [
+                'reason' => 'missing_project_url',
+            ]);
+
+            $run->markCheckpointSkipped(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
+
+            return;
+        }
+
+        $screenshotPath = $this->screenshotPath($run);
+        $screenshotDirectory = dirname($screenshotPath);
+
+        if (! is_dir($screenshotDirectory) && ! mkdir($screenshotDirectory, 0755, true) && ! is_dir($screenshotDirectory)) {
+            throw new Exception("Unable to create screenshot directory [{$screenshotDirectory}].");
+        }
+
+        $this->log($run, 'info', 'Screenshot verification started', [
+            'project_url' => $projectUrl,
+            'screenshot_path' => $screenshotPath,
+        ]);
+
+        $agentResult = $codingAgent->captureScreenshot($task, $run);
+        $this->logAgentMessages($run, $agentResult);
+
+        if (! $agentResult->successful) {
+            throw new Exception((string) $agentResult->error ?: 'Screenshot verification failed.');
+        }
+
+        clearstatcache(true, $screenshotPath);
+
+        if (! is_file($screenshotPath) || filesize($screenshotPath) === 0) {
+            throw new Exception("Screenshot verification did not create [{$screenshotPath}].");
+        }
+
+        $this->log($run, 'info', 'Screenshot captured', [
+            'screenshot_path' => $screenshotPath,
+            'bytes' => filesize($screenshotPath),
+        ]);
+
+        $run->markCheckpointCompleted(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
+    }
+
     private function resolvePullRequestReviewer(Task $task): ?User
     {
         if ($task->reviewer && $this->hasGithubUsername($task->reviewer)) {
@@ -379,6 +429,11 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             'verified_count' => $criteria->count(),
             'newly_verified_count' => $uncheckedCount,
         ]);
+    }
+
+    private function screenshotPath(TaskRun $run): string
+    {
+        return storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
     }
 
     private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run, string $repositoryPath): void
