@@ -37,6 +37,7 @@ Route::middleware(['auth', 'enabled'])->group(function (): void {
     Route::post('/tasks/{task}/approve', [TaskController::class, 'approve'])->name('tasks.approve');
     Route::post('/tasks/{task}/reject', [TaskController::class, 'reject'])->name('tasks.reject');
     Route::post('/tasks/{task}/retry', [TaskController::class, 'retry'])->name('tasks.retry');
+    Route::post('/tasks/{task}/rerun-workflow', [TaskController::class, 'rerunWorkflow'])->name('tasks.rerun-workflow');
     Route::post('/tasks/{task}/create-pr', [TaskController::class, 'createPullRequest'])->name('tasks.create-pr');
     Route::post('/tasks/{task}/refresh-pr', [TaskController::class, 'refreshPullRequest'])->name('tasks.refresh-pr');
 

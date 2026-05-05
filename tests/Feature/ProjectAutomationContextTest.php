@@ -15,6 +15,7 @@ use App\Models\TaskRun;
 use App\Models\TaskRunLog;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
+use Illuminate\Auth\Middleware\Authenticate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Mockery\MockInterface;
@@ -195,6 +196,159 @@ test('retry rejects failed tasks without a matching resumable task run', functio
         ]);
 
     expect($task->refresh()->status)->toBe(Task::STATUS_FAILED);
+
+    Queue::assertNotPushed(DispatchNextTaskRunJob::class);
+});
+
+test('failed tasks can be rerun with a fresh queued workflow run', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox-rerun',
+        'base_branch' => 'develop',
+    ]);
+    $task = Task::create([
+        'title' => 'Rerun failed workflow',
+        'description' => 'A failed task should be eligible for a fresh workflow run.',
+        'acceptance_criteria' => [
+            ['body' => 'Rerun creates a new task run.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+    $failedRun = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_FAILED,
+        'branch_name' => 'ai-task-'.$task->id.'-failed-workflow',
+        'workspace_path' => '/tmp/task-fox-old',
+        'base_branch' => 'main',
+        'last_error' => 'Previous failure.',
+        'finished_at' => now(),
+    ]);
+    $failedRun->initializeWorkflowState($task);
+    TaskRunLog::create([
+        'task_run_id' => $failedRun->id,
+        'level' => 'error',
+        'message' => 'Previous failed workflow log',
+        'context' => [],
+    ]);
+
+    $this->post(route('tasks.rerun-workflow', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Task workflow queued for rerun.');
+
+    $freshRun = TaskRun::query()->whereKeyNot($failedRun->id)->sole();
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_APPROVED)
+        ->approved_by_user_id->toBe(auth()->id())
+        ->approved_at->not->toBeNull()
+        ->and($failedRun->refresh())
+        ->status->toBe(TaskRun::STATUS_FAILED)
+        ->last_error->toBe('Previous failure.')
+        ->and($failedRun->logs()->where('message', 'Previous failed workflow log')->exists())->toBeTrue()
+        ->and($freshRun)
+        ->status->toBe(TaskRun::STATUS_QUEUED)
+        ->branch_name->toBe('pending')
+        ->workspace_path->toBe('/tmp/task-fox-rerun')
+        ->base_branch->toBe('develop')
+        ->attempt_count->toBe(0)
+        ->review_attempt_count->toBe(0)
+        ->and($freshRun->requestHash())->toBe(TaskRun::requestHashForTask($task->refresh()))
+        ->and($freshRun->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+
+    Queue::assertPushed(
+        DispatchNextTaskRunJob::class,
+        fn (DispatchNextTaskRunJob $job): bool => $job->taskId === $task->id,
+    );
+});
+
+test('only failed tasks can be rerun', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+    ]);
+    $task = Task::create([
+        'title' => 'Already approved',
+        'description' => 'Rerun should be limited to failed tasks.',
+        'acceptance_criteria' => [
+            ['body' => 'Non-failed task is not queued.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+
+    $this->post(route('tasks.rerun-workflow', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'status' => 'Only failed tasks can be rerun.',
+        ]);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_APPROVED)
+        ->and(TaskRun::query()->count())->toBe(0);
+
+    Queue::assertNotPushed(DispatchNextTaskRunJob::class);
+});
+
+test('rerun requires a project before creating a fresh workflow run', function () {
+    Queue::fake();
+
+    $task = Task::create([
+        'title' => 'Projectless rerun',
+        'description' => 'Rerun needs repository context.',
+        'acceptance_criteria' => [
+            ['body' => 'Project is required.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $this->post(route('tasks.rerun-workflow', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'project' => 'Assign a project before rerunning this task.',
+        ]);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and(TaskRun::query()->count())->toBe(0);
+
+    Queue::assertNotPushed(DispatchNextTaskRunJob::class);
+});
+
+test('rerun requires an actor before creating a fresh workflow run', function () {
+    Queue::fake();
+
+    $this->withoutMiddleware(Authenticate::class);
+    auth()->logout();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+    ]);
+    $task = Task::create([
+        'title' => 'Actorless rerun',
+        'description' => 'Rerun needs an approval actor.',
+        'acceptance_criteria' => [
+            ['body' => 'Actor is required.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+
+    $this->post(route('tasks.rerun-workflow', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasErrors([
+            'actor' => 'No actor available to record rerun approval.',
+        ]);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and(TaskRun::query()->count())->toBe(0);
 
     Queue::assertNotPushed(DispatchNextTaskRunJob::class);
 });
@@ -1300,7 +1454,6 @@ test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when 
     config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
-    runSuccessfulProcess(['git', 'remote', 'remove', 'origin'], $repositoryPath);
 
     $task = createApprovedAutomationTask($repositoryPath, 'Push failure before PR');
     $run = createAutomationRun($task, $repositoryPath, 'task/push-failure-before-pr');
@@ -1314,6 +1467,7 @@ test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when 
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
+                    runSuccessfulProcess(['git', 'remote', 'remove', 'origin'], $repositoryPath);
                     file_put_contents($repositoryPath.'/push-failure.txt', "Cannot push\n");
 
                     return new CodingAgentResult(successful: true);
@@ -1623,6 +1777,70 @@ test('repository checkpoint retry checks out existing ai branch without resettin
 
     expect(trim(runSuccessfulProcessWithOutput(['git', 'branch', '--show-current'], $repositoryPath)))
         ->toBe('task/preserve-branch-work');
+});
+
+test('fresh repository preparation discards dirty work and recreates task branch from updated base', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $originPath = trim(runSuccessfulProcessWithOutput(['git', 'remote', 'get-url', 'origin'], $repositoryPath));
+    $upstreamPath = sys_get_temp_dir().'/task-fox-upstream-'.uniqid();
+
+    runSuccessfulProcess(['git', 'clone', $originPath, $upstreamPath], sys_get_temp_dir());
+    runSuccessfulProcess(['git', 'config', 'user.email', 'upstream@example.com'], $upstreamPath);
+    runSuccessfulProcess(['git', 'config', 'user.name', 'Task Fox Upstream'], $upstreamPath);
+    file_put_contents($upstreamPath.'/base.txt', "Latest base\n");
+    runSuccessfulProcess(['git', 'add', 'base.txt'], $upstreamPath);
+    runSuccessfulProcess(['git', 'commit', '-m', 'Update base branch'], $upstreamPath);
+    runSuccessfulProcess(['git', 'push', 'origin', 'main'], $upstreamPath);
+
+    file_put_contents($repositoryPath.'/README.md', "Dirty workspace\n");
+    file_put_contents($repositoryPath.'/untracked.txt', "Remove me\n");
+
+    $task = createApprovedAutomationTask($repositoryPath, 'Fresh preparation');
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_QUEUED,
+        'branch_name' => 'pending',
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath, $task): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturnUsing(function () use ($repositoryPath, $task): CodingAgentResult {
+                    expect(file_get_contents($repositoryPath.'/README.md'))->toBe("Review test\n")
+                        ->and(file_exists($repositoryPath.'/untracked.txt'))->toBeFalse()
+                        ->and(file_get_contents($repositoryPath.'/base.txt'))->toBe("Latest base\n")
+                        ->and(trim(runSuccessfulProcessWithOutput(['git', 'branch', '--show-current'], $repositoryPath)))
+                        ->toBe('ai-task-'.$task->id.'-fresh-preparation');
+
+                    return new CodingAgentResult(successful: true, payload: ['plan' => 'Verify fresh preparation.']);
+                });
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: fresh preparation']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    $baseCommit = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', 'main'], $repositoryPath));
+    $branchParent = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', 'ai-task-'.$task->id.'-fresh-preparation~0'], $repositoryPath));
+
+    expect($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_REPOSITORY_PREPARED))->toBeTrue()
+        ->and($branchParent)->toBe($baseCommit);
 });
 
 test('failed task can create a pull request from the latest task run branch', function () {

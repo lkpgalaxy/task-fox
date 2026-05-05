@@ -289,6 +289,11 @@ export default function TasksIndex() {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
     const [showPrIdentityModal, setShowPrIdentityModal] = useState(false);
+    const [showRerunWorkflowModal, setShowRerunWorkflowModal] =
+        useState(false);
+    const [rerunWorkflowTaskId, setRerunWorkflowTaskId] = useState<
+        number | null
+    >(null);
     const [dismissedPrIdentityError, setDismissedPrIdentityError] =
         useState(false);
     const [editingTask, setEditingTask] = useState<TaskRecord | null>(null);
@@ -536,6 +541,34 @@ export default function TasksIndex() {
         );
     };
 
+    const openRerunWorkflowModal = (taskId: number) => {
+        setRerunWorkflowTaskId(taskId);
+        setShowRerunWorkflowModal(true);
+    };
+
+    const closeRerunWorkflowModal = () => {
+        setShowRerunWorkflowModal(false);
+        setRerunWorkflowTaskId(null);
+    };
+
+    const submitRerunWorkflow = () => {
+        if (rerunWorkflowTaskId === null) {
+            return;
+        }
+
+        router.post(
+            tasks.rerunWorkflow.url(rerunWorkflowTaskId),
+            {},
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    openTaskDetails(rerunWorkflowTaskId);
+                    closeRerunWorkflowModal();
+                },
+            },
+        );
+    };
+
     const submitCreatePr = (taskId: number) => {
         if (
             !auth.user?.email ||
@@ -752,10 +785,48 @@ export default function TasksIndex() {
                         onApprove={() => submitApprove(selectedTask.id)}
                         onReject={() => submitReject(selectedTask.id)}
                         onRetry={() => submitRetry(selectedTask.id)}
+                        onRerunWorkflow={() =>
+                            openRerunWorkflowModal(selectedTask.id)
+                        }
                         onCreatePr={() => submitCreatePr(selectedTask.id)}
                         onRefreshPr={() => submitRefreshPr(selectedTask.id)}
                     />
                 ) : null}
+            </Modal>
+
+            <Modal
+                show={showRerunWorkflowModal}
+                onClose={closeRerunWorkflowModal}
+                title="Rerun workflow"
+                size="md"
+            >
+                <div className="grid gap-4">
+                    <Alert tone="danger">
+                        Rerunning the workflow will discard uncommitted and
+                        untracked files in the project workspace before pulling
+                        the latest base branch changes.
+                    </Alert>
+                    <p className="text-sm leading-6 text-ink-muted">
+                        Previous failed runs and logs stay available. The new
+                        run starts from a freshly prepared task branch.
+                    </p>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={closeRerunWorkflowModal}
+                        >
+                            Cancel
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="danger"
+                            onClick={submitRerunWorkflow}
+                        >
+                            Rerun workflow
+                        </Button>
+                    </div>
+                </div>
             </Modal>
 
             <Modal
@@ -836,6 +907,7 @@ function TaskDetails({
     onApprove,
     onReject,
     onRetry,
+    onRerunWorkflow,
     onCreatePr,
     onRefreshPr,
 }: {
@@ -845,6 +917,7 @@ function TaskDetails({
     onApprove: () => void;
     onReject: () => void;
     onRetry: () => void;
+    onRerunWorkflow: () => void;
     onCreatePr: () => void;
     onRefreshPr: () => void;
 }) {
@@ -940,7 +1013,22 @@ function TaskDetails({
                             disabled={task.project_id === null}
                             onClick={onRetry}
                         >
-                            Retry
+                            Retry failed checkpoint
+                        </Button>
+                    ) : null}
+                    {task.status === 'failed' ? (
+                        <Button
+                            type="button"
+                            variant="danger"
+                            title={
+                                task.project_id === null
+                                    ? 'Assign a project before rerunning this task.'
+                                    : undefined
+                            }
+                            disabled={task.project_id === null}
+                            onClick={onRerunWorkflow}
+                        >
+                            Rerun workflow
                         </Button>
                     ) : null}
                     {latestPullRequestRun ? (

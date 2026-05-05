@@ -150,7 +150,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
         $run->update(['status' => TaskRun::STATUS_PREPARING]);
 
-        $this->assertRepositoryReady($repositoryPath, $baseBranch);
+        $this->assertRepositoryExists($repositoryPath);
+        $this->resetBaseBranch($repositoryPath, $baseBranch);
         $this->createBranch($repositoryPath, $branchName, $baseBranch);
 
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
@@ -267,7 +268,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return $user->github_username !== null && $user->github_username !== '';
     }
 
-    private function assertRepositoryReady(string $path, string $baseBranch): void
+    private function assertRepositoryExists(string $path): void
     {
         if ($path === '') {
             throw new Exception('Repository path is missing from configuration.');
@@ -277,20 +278,34 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         if (! $status->isSuccessful()) {
             throw new Exception('Target path is not a git repository.');
         }
+    }
 
-        $cleanCheck = $this->runProcess(['git', 'status', '--short'], $path);
-        if (! $cleanCheck->isSuccessful()) {
-            throw new Exception('Unable to verify git working tree clean state: '.trim((string) $cleanCheck->getErrorOutput()));
-        }
-
-        if (trim((string) $cleanCheck->getOutput()) !== '') {
-            throw new Exception('Repository is not clean; commit or stash changes before running AI agent.');
-        }
-
+    private function resetBaseBranch(string $path, string $baseBranch): void
+    {
         $branch = $this->normalizeBaseBranch($baseBranch);
         $baseBranchCheck = $this->runProcess(['git', 'rev-parse', '--verify', $branch], $path);
         if (! $baseBranchCheck->isSuccessful()) {
             throw new Exception("Base branch {$branch} does not exist in repository.");
+        }
+
+        $result = $this->runProcess(['git', 'checkout', '-f', $branch], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to checkout base branch: '.trim((string) $result->getErrorOutput()));
+        }
+
+        $result = $this->runProcess(['git', 'reset', '--hard'], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to reset base branch: '.trim((string) $result->getErrorOutput()));
+        }
+
+        $result = $this->runProcess(['git', 'clean', '-fd'], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to clean repository: '.trim((string) $result->getErrorOutput()));
+        }
+
+        $result = $this->runProcess(['git', 'pull', '--rebase', 'origin', $branch], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to update base branch: '.trim((string) $result->getErrorOutput()));
         }
     }
 

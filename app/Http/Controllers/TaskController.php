@@ -426,6 +426,68 @@ class TaskController extends Controller
             ->with('status', 'Task queued for retry.');
     }
 
+    public function rerunWorkflow(Task $task): RedirectResponse
+    {
+        $task->loadMissing('project');
+
+        if ($task->status !== Task::STATUS_FAILED) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['status' => 'Only failed tasks can be rerun.']);
+        }
+
+        if ($task->project_id === null || ! $task->project) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['project' => 'Assign a project before rerunning this task.']);
+        }
+
+        $actor = $this->resolveCurrentUser();
+
+        if ($actor === null) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['actor' => 'No actor available to record rerun approval.']);
+        }
+
+        $task->update([
+            'status' => Task::STATUS_APPROVED,
+            'approved_by_user_id' => $actor->id,
+            'approved_at' => now(),
+            'rejected_at' => null,
+        ]);
+
+        $baseBranch = trim((string) $task->project->base_branch) !== ''
+            ? (string) $task->project->base_branch
+            : 'main';
+
+        $run = $task->taskRuns()->create([
+            'status' => TaskRun::STATUS_QUEUED,
+            'attempt_count' => 0,
+            'review_attempt_count' => 0,
+            'branch_name' => 'pending',
+            'workspace_path' => (string) $task->project->workspace_path,
+            'base_branch' => $baseBranch,
+        ]);
+        $run->initializeWorkflowState($task);
+
+        if ($task->externalTaskLink) {
+            $this->recordExternalMessage(
+                $task,
+                'attempt',
+                ['task_id' => $task->id, 'status' => Task::STATUS_APPROVED, 'run_id' => $run->id, 'mode' => 'rerun_workflow'],
+                'success',
+                null,
+            );
+        }
+
+        DispatchNextTaskRunJob::dispatch($task->id);
+
+        return redirect()
+            ->route('tasks.index', ['task' => $task->id])
+            ->with('status', 'Task workflow queued for rerun.');
+    }
+
     public function createPullRequest(Task $task): RedirectResponse
     {
         $task->loadMissing(['assignee', 'reviewer', 'externalTaskLink', 'latestTaskRun', 'latestPullRequestRun', 'project.defaultReviewer']);
