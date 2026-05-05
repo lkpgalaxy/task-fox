@@ -295,6 +295,8 @@ class CodexCodingAgent implements CodingAgent
                 })
                 ->join("\n");
         $screenshotPath = storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
+        $projectUrl = trim((string) $task->project?->url);
+        $projectUrl = $projectUrl !== '' ? $projectUrl : 'No project URL configured; skip Playwright screenshot capture unless a reachable project URL is available from task context.';
 
         return <<<PROMPT
 Implement task {$task->id}: {$task->title}
@@ -308,6 +310,9 @@ Acceptance criteria:
 Stored implementation plan:
 {$planBlock}
 
+Project URL for frontend screenshots:
+{$projectUrl}
+
 Plan-following instructions:
 - Follow the stored implementation plan above as the implementation contract for this run.
 - Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.
@@ -318,12 +323,13 @@ Acceptance-criteria-driven workflow:
 3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
 4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
 5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
-6. For frontend behavior, add backend assertions where possible, run TypeScript/lint checks for React/Inertia changes, and use Playwright to capture a screenshot of the implemented result at this absolute path outside the repository: {$screenshotPath}
+6. For frontend behavior, add backend assertions where possible, run TypeScript/lint checks for React/Inertia changes, open the project URL above or the relevant page under it with Playwright, and capture a screenshot of the implemented result at this absolute path outside the repository: {$screenshotPath}
 7. Create the screenshot directory if it does not exist, and include the screenshot path in your final response when a screenshot was captured.
-8. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
-9. Fix failing tests instead of ignoring them.
-10. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
-11. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+8. Do not start the application or dev server for screenshots; use the configured project URL.
+9. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+10. Fix failing tests instead of ignoring them.
+11. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
+12. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
 PROMPT;
     }
 

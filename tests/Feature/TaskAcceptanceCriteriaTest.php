@@ -496,6 +496,11 @@ test('codex agent prompt renders acceptance criteria from the task json column',
 });
 
 test('codex agent prompt enforces acceptance criteria driven implementation workflow', function () {
+    $project = Project::create([
+        'name' => 'Workflow App',
+        'workspace_path' => '/tmp/workflow-app',
+        'url' => 'https://workflow.test',
+    ]);
     $task = Task::create([
         'title' => 'Implement workflow',
         'description' => 'Use acceptance criteria as the implementation contract.',
@@ -505,6 +510,7 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
     ]);
 
     $reflection = new ReflectionClass(CodexCodingAgent::class);
@@ -521,6 +527,8 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Acceptance-criteria-driven workflow:')
         ->toContain('Stored implementation plan:')
         ->toContain('Inspect the workflow and update the implementation.')
+        ->toContain('Project URL for frontend screenshots:')
+        ->toContain('https://workflow.test')
         ->toContain('Follow the stored implementation plan above as the implementation contract for this run.')
         ->toContain('Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.')
         ->toContain('1. [ ] List criteria before implementation.')
@@ -531,10 +539,12 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('pause and ask for clarification before implementation')
         ->toContain('Pest feature/unit tests so each acceptance criterion has direct coverage')
         ->toContain('run TypeScript/lint checks for React/Inertia changes')
-        ->toContain('use Playwright to capture a screenshot of the implemented result')
+        ->toContain('with Playwright, and capture a screenshot of the implemented result')
+        ->toContain('open the project URL above or the relevant page under it with Playwright')
         ->toContain(storage_path("app/task-runs/{$run->id}/screenshots/implementation.png"))
         ->toContain('Create the screenshot directory if it does not exist')
         ->toContain('include the screenshot path in your final response when a screenshot was captured')
+        ->toContain('Do not start the application or dev server for screenshots; use the configured project URL')
         ->toContain('vendor/bin/pint --dirty --format agent')
         ->toContain('php artisan test --compact')
         ->toContain('Fix failing tests instead of ignoring them')
