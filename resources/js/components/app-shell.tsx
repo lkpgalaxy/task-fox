@@ -49,20 +49,21 @@ export function AppShell({
     }>();
     const pathname = url.split('?')[0] ?? url;
     const authUser = props.auth.user;
+    const flashStatus = props.flash?.status;
     const toastMessages = useMemo(
         () => [
-            ...(props.flash?.status
+            ...(flashStatus
                 ? [
                       {
-                          id: `flash-status-${props.flash.status}`,
+                          id: `flash-status-${flashStatus}`,
                           tone: 'success' as const,
-                          message: props.flash.status,
+                          message: flashStatus,
                       },
                   ]
                 : []),
             ...toasts,
         ],
-        [props.flash?.status, toasts],
+        [flashStatus, toasts],
     );
     const visibleNavigation =
         authUser?.role === 'admin'

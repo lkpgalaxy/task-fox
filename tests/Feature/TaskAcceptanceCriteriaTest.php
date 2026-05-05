@@ -5,6 +5,7 @@ use App\Models\Project;
 use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRun;
+use App\Models\TaskRunLog;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use App\Services\PullRequests\GithubPullRequestProvider;
@@ -552,7 +553,7 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Final response must include the acceptance-criteria checklist, tests run, and whether they passed');
 });
 
-test('codex review command uses native review mode and parses a passing JSON response', function () {
+test('codex review command uses native review mode and accepts passing text output', function () {
     $workspacePath = sys_get_temp_dir().'/task-fox-review-workspace-'.uniqid();
     $binPath = sys_get_temp_dir().'/task-fox-review-codex-bin-'.uniqid();
     $argsPath = $workspacePath.'/args.txt';
@@ -563,7 +564,7 @@ test('codex review command uses native review mode and parses a passing JSON res
     createCodexReviewStub(
         $binPath,
         $argsPath,
-        '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks good.","overall_confidence_score":0.98}',
+        'No findings.',
     );
 
     $task = Task::create([
@@ -584,7 +585,7 @@ test('codex review command uses native review mode and parses a passing JSON res
         'status' => TaskRun::STATUS_REVIEWING_CHANGES,
         'branch_name' => 'task/review-command',
         'workspace_path' => $workspacePath,
-        'base_branch' => 'develop',
+        'base_branch' => 'staging',
     ]);
 
     $result = (new CodexCodingAgent([
@@ -594,7 +595,7 @@ test('codex review command uses native review mode and parses a passing JSON res
     $args = file($argsPath, FILE_IGNORE_NEW_LINES);
 
     expect($result->successful)->toBeTrue()
-        ->and($result->payload['overall_correctness'])->toBe('patch is correct')
+        ->and($result->payload['review_text'])->toBe('No findings.')
         ->and($args)->toContain('exec')
         ->and($args)->toContain('--model')
         ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.5')
@@ -604,14 +605,12 @@ test('codex review command uses native review mode and parses a passing JSON res
         ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath)
         ->and($args)->toContain('review')
         ->and($args)->toContain('--base')
-        ->and($args[array_search('--base', $args, true) + 1])->toBe('develop')
-        ->and($args)->toContain('--uncommitted')
+        ->and($args[array_search('--base', $args, true) + 1])->toBe('staging')
+        ->and($args)->not->toContain('--uncommitted')
         ->and($args)->toContain('--title')
         ->and($args[array_search('--title', $args, true) + 1])->toBe('Task '.$task->id.': Review command')
         ->and($args)->toContain('--output-last-message')
-        ->and($args[array_search('--output-last-message', $args, true) + 1])->toStartWith(sys_get_temp_dir())
-        ->and(file_get_contents($argsPath))->toContain('"overall_correctness": "patch is correct"')
-        ->and(file_get_contents($argsPath))->toContain('Return exactly one JSON object with this shape:');
+        ->and($args[array_search('--output-last-message', $args, true) + 1])->toStartWith(sys_get_temp_dir());
 });
 
 test('codex review command omits the model flag when no review model is configured', function () {
@@ -624,7 +623,7 @@ test('codex review command omits the model flag when no review model is configur
     createCodexReviewStub(
         $binPath,
         $argsPath,
-        '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks good.","overall_confidence_score":0.98}',
+        'No actionable findings.',
     );
 
     $task = Task::create([
@@ -669,7 +668,7 @@ test('codex review command surfaces findings as a failed review result', functio
     createCodexReviewStub(
         $binPath,
         $argsPath,
-        '{"findings":[{"title":"[P2] Missing test","body":"Add a test for the new behavior.","confidence_score":0.87,"priority":2,"code_location":{"absolute_file_path":"/tmp/example.php","line_range":{"start":1,"end":3}}}],"overall_correctness":"patch is incorrect","overall_explanation":"The test coverage is missing.","overall_confidence_score":0.87}',
+        "The tracked diff is missing test coverage.\n\nReview comment:\n\n- [P2] Missing test -- /tmp/example.php:1-3\n  Add a test for the new behavior.",
     );
 
     $task = Task::create([
@@ -694,25 +693,24 @@ test('codex review command surfaces findings as a failed review result', functio
     ]))->reviewChanges($task, $run, 1);
 
     expect($result->successful)->toBeFalse()
-        ->and($result->payload['overall_correctness'])->toBe('patch is incorrect')
-        ->and($result->payload['findings'])->toHaveCount(1)
-        ->and($result->payload['findings'][0]['title'])->toBe('[P2] Missing test');
+        ->and($result->error)->toContain('[P2] Missing test')
+        ->and($result->payload['review_text'])->toContain('Add a test for the new behavior.');
 });
 
-test('codex review command fails closed on invalid json output', function () {
+test('codex review command fails closed on empty text output', function () {
     $workspacePath = sys_get_temp_dir().'/task-fox-review-invalid-workspace-'.uniqid();
     $binPath = sys_get_temp_dir().'/task-fox-review-invalid-bin-'.uniqid();
     $argsPath = $workspacePath.'/args.txt';
 
     mkdir($workspacePath);
     mkdir($binPath);
-    createCodexReviewStub($binPath, $argsPath, 'not json');
+    createCodexReviewStub($binPath, $argsPath, '');
 
     $task = Task::create([
-        'title' => 'Review invalid json',
-        'description' => 'Invalid output should fail closed.',
+        'title' => 'Review empty output',
+        'description' => 'Empty output should fail closed.',
         'acceptance_criteria' => [
-            ['body' => 'Invalid JSON is rejected.', 'checked' => false],
+            ['body' => 'Empty review output is rejected.', 'checked' => false],
         ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
@@ -720,7 +718,7 @@ test('codex review command fails closed on invalid json output', function () {
     $run = TaskRun::create([
         'task_id' => $task->id,
         'status' => TaskRun::STATUS_REVIEWING_CHANGES,
-        'branch_name' => 'task/review-invalid',
+        'branch_name' => 'task/review-empty',
         'workspace_path' => $workspacePath,
         'base_branch' => 'develop',
     ]);
@@ -730,8 +728,8 @@ test('codex review command fails closed on invalid json output', function () {
     ]))->reviewChanges($task, $run, 1);
 
     expect($result->successful)->toBeFalse()
-        ->and($result->error)->toStartWith('Coding agent returned invalid review JSON:')
-        ->and($result->payload['raw_output'])->toBe('not json');
+        ->and($result->error)->toBe('Coding agent review returned no output.')
+        ->and($result->payload['review_text'])->toBe('');
 });
 
 test('codex review fix prompt includes the review feedback and fix instructions', function () {
@@ -758,7 +756,7 @@ test('codex review fix prompt includes the review feedback and fix instructions'
         new CodexCodingAgent,
         $task,
         $run,
-        "Error: Needs fixes.\n\nMessages:\n- review output\n\nPayload:\n{\"findings\":[]}",
+        "Error: Needs fixes.\n\nReview text:\n- [P1] Include missing views.",
         2,
     );
 
@@ -773,6 +771,7 @@ test('codex review fix prompt includes the review feedback and fix instructions'
         ->toContain('Review attempt: 2')
         ->toContain('Review feedback:')
         ->toContain('Needs fixes.')
+        ->toContain('Include missing views.')
         ->toContain('Make the smallest correct fix that resolves the review feedback.')
         ->toContain('Do not commit, push, or create a pull request.')
         ->toContain('leave a final checklist of the addressed findings in your response');
@@ -1026,6 +1025,68 @@ test('task index can select a pending approval task without external messages', 
             ->where('selectedTask.id', $task->id)
             ->where('selectedTask.status', Task::STATUS_PENDING_APPROVAL)
             ->where('selectedTask.external_messages', [])
+        );
+});
+
+test('task index partial reload refreshes only the selected task details', function () {
+    $this->withoutVite();
+
+    $task = Task::create([
+        'title' => 'Polling detail task',
+        'description' => 'Refresh this task without reloading the board.',
+        'acceptance_criteria' => [
+            ['body' => 'Selected task data refreshes independently.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_RUNNING,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_PLANNING,
+        'branch_name' => 'task/polling-detail',
+        'workflow_state' => [
+            'request_hash' => 'initial-hash',
+            'checkpoints' => [],
+        ],
+    ]);
+
+    $response = $this->get(route('tasks.index', ['task' => $task->id]));
+
+    TaskRunLog::create([
+        'task_run_id' => $run->id,
+        'level' => 'info',
+        'message' => 'Polling refreshed this log',
+        'context' => ['checkpoint' => 'planned'],
+    ]);
+
+    $run->update([
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'workflow_state' => [
+            'request_hash' => 'updated-hash',
+            'checkpoints' => [
+                ['name' => 'planned', 'status' => 'completed'],
+            ],
+        ],
+    ]);
+
+    $response
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('tasks/Index')
+            ->has('tasks', 1)
+            ->has('users')
+            ->where('selectedTask.id', $task->id)
+            ->reloadOnly('selectedTask', fn (Assert $reload) => $reload
+                ->missing('tasks')
+                ->missing('users')
+                ->missing('sourceInputs')
+                ->missing('projects')
+                ->where('selectedTask.id', $task->id)
+                ->where('selectedTask.task_runs.0.status', TaskRun::STATUS_IMPLEMENTING)
+                ->where('selectedTask.task_runs.0.workflow_state.request_hash', 'updated-hash')
+                ->where('selectedTask.task_runs.0.logs.0.message', 'Polling refreshed this log')
+            )
         );
 });
 

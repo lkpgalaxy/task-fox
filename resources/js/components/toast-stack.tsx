@@ -15,19 +15,13 @@ const toastClasses: Record<Toast['tone'], string> = {
 };
 
 export function ToastStack({ toasts }: { toasts: Toast[] }) {
-    const [visibleToastIds, setVisibleToastIds] = useState<string[]>(() =>
-        toasts.map((toast) => toast.id),
-    );
-
-    useEffect(() => {
-        setVisibleToastIds(toasts.map((toast) => toast.id));
-    }, [toasts]);
+    const [dismissedToastIds, setDismissedToastIds] = useState<string[]>([]);
 
     useEffect(() => {
         const timers = toasts.map((toast) =>
             window.setTimeout(() => {
-                setVisibleToastIds((current) =>
-                    current.filter((id) => id !== toast.id),
+                setDismissedToastIds((current) =>
+                    current.includes(toast.id) ? current : [...current, toast.id],
                 );
             }, autoHideMs),
         );
@@ -37,8 +31,8 @@ export function ToastStack({ toasts }: { toasts: Toast[] }) {
         };
     }, [toasts]);
 
-    const visibleToasts = toasts.filter((toast) =>
-        visibleToastIds.includes(toast.id),
+    const visibleToasts = toasts.filter(
+        (toast) => !dismissedToastIds.includes(toast.id),
     );
 
     if (visibleToasts.length === 0) {
@@ -67,8 +61,10 @@ export function ToastStack({ toasts }: { toasts: Toast[] }) {
                         className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-base leading-none text-ink-subtle transition hover:bg-surface-3 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-focus"
                         aria-label="Dismiss message"
                         onClick={() =>
-                            setVisibleToastIds((current) =>
-                                current.filter((id) => id !== toast.id),
+                            setDismissedToastIds((current) =>
+                                current.includes(toast.id)
+                                    ? current
+                                    : [...current, toast.id],
                             )
                         }
                     >

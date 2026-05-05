@@ -4,13 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\TaskRunLog;
 use Inertia\Inertia;
+use Inertia\Response;
 
 class TaskRunLogController extends Controller
 {
-    public function index()
+    public function index(): Response
     {
         return Inertia::render('tasks/Logs', [
-            'logs' => TaskRunLog::query()
+            'logs' => fn () => TaskRunLog::query()
                 ->with([
                     'taskRun.task:id,title,status',
                     'inputSource:id,title,analysis_status',

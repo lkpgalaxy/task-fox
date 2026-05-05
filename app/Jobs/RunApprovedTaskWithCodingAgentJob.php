@@ -416,7 +416,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     'error' => $agentResult->error,
                 ]);
 
-                throw new Exception('Coding agent review failed after retry limit reached.');
+                $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+
+                return;
             }
 
             $reviewFeedback = $this->buildReviewFeedback($agentResult);
@@ -448,7 +450,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
         }
 
-        throw new Exception('Coding agent review failed after retry limit reached.');
+        $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
     }
 
     private function commitChanges(
@@ -574,18 +576,25 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
         $reviewer = $this->resolvePullRequestReviewer($task);
         if (! $reviewer || ! $run->pull_request_url) {
+            $this->logReviewRequestSkipped(
+                $run,
+                $reviewer,
+                $reviewer ? 'missing_pull_request_url' : 'missing_reviewer',
+            );
             $run->markCheckpointSkipped(TaskRun::CHECKPOINT_REVIEW_REQUESTED);
 
             return;
         }
 
         if ($task->assignee && $this->isSameGithubUser($reviewer, $task->assignee)) {
+            $this->logReviewRequestSkipped($run, $reviewer, 'reviewer_is_pull_request_author', $task->assignee);
             $run->markCheckpointSkipped(TaskRun::CHECKPOINT_REVIEW_REQUESTED);
 
             return;
         }
 
         if ($task->approvedByUser && $this->isSameGithubUser($reviewer, $task->approvedByUser)) {
+            $this->logReviewRequestSkipped($run, $reviewer, 'reviewer_is_task_approver', $task->approvedByUser);
             $run->markCheckpointSkipped(TaskRun::CHECKPOINT_REVIEW_REQUESTED);
 
             return;
@@ -612,6 +621,18 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     private function isSameGithubUser(User $first, User $second): bool
     {
         return mb_strtolower((string) $first->github_username) === mb_strtolower((string) $second->github_username);
+    }
+
+    private function logReviewRequestSkipped(TaskRun $run, ?User $reviewer, string $reason, ?User $matchingUser = null): void
+    {
+        $this->log($run, 'info', 'Pull request review request skipped', [
+            'checkpoint' => TaskRun::CHECKPOINT_REVIEW_REQUESTED,
+            'reason' => $reason,
+            'reviewer_user_id' => $reviewer?->id,
+            'reviewer_github_username' => $reviewer?->github_username,
+            'matching_user_id' => $matchingUser?->id,
+            'matching_github_username' => $matchingUser?->github_username,
+        ]);
     }
 
     private function updateExternalTask(ExternalTaskProvider $externalTaskProvider, Task $task, TaskRun $run): void
@@ -716,26 +737,40 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     private function buildReviewFeedback(CodingAgentResult $agentResult): string
     {
         $sections = [];
+        $reviewText = trim((string) Arr::get($agentResult->payload, 'review_text', ''));
 
-        if ($agentResult->error !== null && $agentResult->error !== '') {
-            $sections[] = 'Error: '.$agentResult->error;
+        if ($agentResult->error !== null && $agentResult->error !== '' && $agentResult->error !== $reviewText) {
+            $sections[] = 'Error: '.$this->limitReviewFeedback($agentResult->error, 12000);
         }
 
-        if ($agentResult->messages !== []) {
+        if ($reviewText !== '') {
+            $sections[] = "Review text:\n".$this->limitReviewFeedback($reviewText, 12000);
+        } elseif ($agentResult->messages !== []) {
             $sections[] = "Messages:\n".implode("\n", array_map(
-                static fn (string $message): string => '- '.$message,
+                fn (string $message): string => '- '.$this->limitReviewFeedback($message, 3000),
                 $agentResult->messages,
             ));
         }
 
-        if ($agentResult->payload !== []) {
+        if ($agentResult->payload !== [] && $reviewText === '') {
             $sections[] = "Payload:\n".json_encode(
                 $agentResult->payload,
                 JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
             );
         }
 
-        return implode("\n\n", $sections);
+        return $this->limitReviewFeedback(implode("\n\n", $sections), 16000);
+    }
+
+    private function limitReviewFeedback(string $text, int $limit): string
+    {
+        $text = trim($text);
+
+        if (Str::length($text) <= $limit) {
+            return $text;
+        }
+
+        return Str::substr($text, 0, $limit)."\n\n[truncated to keep review-fix prompt within OS argument limits]";
     }
 
     private function resolveBaseBranch(TaskRun $run): string

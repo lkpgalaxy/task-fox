@@ -1,4 +1,4 @@
-import { Head, router, useForm, usePage } from '@inertiajs/react';
+import { Head, router, useForm, usePage, usePoll } from '@inertiajs/react';
 import { useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { AppShell } from '@/components/app-shell';
@@ -775,22 +775,27 @@ export default function TasksIndex() {
                 onClose={closeTaskDetails}
                 title={selectedTask ? selectedTask.title : 'Task details'}
             >
-                {selectedTask ? (
-                    <TaskDetails
-                        task={selectedTask}
-                        onEdit={() => startEdit(selectedTask)}
-                        onSubmitForApproval={() =>
-                            submitForApproval(selectedTask.id)
-                        }
-                        onApprove={() => submitApprove(selectedTask.id)}
-                        onReject={() => submitReject(selectedTask.id)}
-                        onRetry={() => submitRetry(selectedTask.id)}
-                        onRerunWorkflow={() =>
-                            openRerunWorkflowModal(selectedTask.id)
-                        }
-                        onCreatePr={() => submitCreatePr(selectedTask.id)}
-                        onRefreshPr={() => submitRefreshPr(selectedTask.id)}
-                    />
+                {selectedTask && !showEditModal ? (
+                    <>
+                        <TaskDetailsPoller />
+                        <TaskDetails
+                            task={selectedTask}
+                            onEdit={() => startEdit(selectedTask)}
+                            onSubmitForApproval={() =>
+                                submitForApproval(selectedTask.id)
+                            }
+                            onApprove={() => submitApprove(selectedTask.id)}
+                            onReject={() => submitReject(selectedTask.id)}
+                            onRetry={() => submitRetry(selectedTask.id)}
+                            onRerunWorkflow={() =>
+                                openRerunWorkflowModal(selectedTask.id)
+                            }
+                            onCreatePr={() => submitCreatePr(selectedTask.id)}
+                            onRefreshPr={() =>
+                                submitRefreshPr(selectedTask.id)
+                            }
+                        />
+                    </>
                 ) : null}
             </Modal>
 
@@ -857,6 +862,15 @@ export default function TasksIndex() {
             </Modal>
         </AppShell>
     );
+}
+
+function TaskDetailsPoller() {
+    usePoll(5000, {
+        only: ['selectedTask'],
+        preserveErrors: true,
+    });
+
+    return null;
 }
 
 function TaskCard({

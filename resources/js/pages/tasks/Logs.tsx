@@ -1,4 +1,4 @@
-import { Head, Link, usePage } from '@inertiajs/react';
+import { Head, Link, usePage, usePoll } from '@inertiajs/react';
 import { useState } from 'react';
 import { AppShell } from '@/components/app-shell';
 import {
@@ -50,6 +50,11 @@ export default function LogsIndex() {
         title: string;
         json: string;
     } | null>(null);
+
+    usePoll(5000, {
+        only: ['logs'],
+        preserveErrors: true,
+    });
 
     return (
         <AppShell

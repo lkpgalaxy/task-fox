@@ -33,7 +33,41 @@ class TaskController extends Controller
 
     public function index(Request $request): Response
     {
-        $tasks = Task::query()
+        return Inertia::render('tasks/Index', [
+            'tasks' => fn () => $this->taskBoard(),
+            'users' => fn () => User::query()->orderBy('name')->get(['id', 'name', 'github_username']),
+            'sourceInputs' => fn () => $this->sourceInputs(),
+            'projects' => fn () => Project::query()
+                ->orderBy('name')
+                ->get()
+                ->map(fn (Project $project): array => [
+                    'id' => $project->id,
+                    'name' => (string) $project->name,
+                    'default_reviewer_user_id' => $project->default_reviewer_user_id,
+                ]),
+            'selectedTask' => fn () => $this->selectedTask($request),
+            'taskStatuses' => [
+                Task::STATUS_DRAFT,
+                Task::STATUS_PENDING_APPROVAL,
+                Task::STATUS_APPROVED,
+                Task::STATUS_RUNNING,
+                Task::STATUS_PR_CREATED,
+                Task::STATUS_DONE,
+                Task::STATUS_FAILED,
+                Task::STATUS_REJECTED,
+            ],
+            'priorities' => [
+                Task::PRIORITY_LOW,
+                Task::PRIORITY_MEDIUM,
+                Task::PRIORITY_HIGH,
+                Task::PRIORITY_URGENT,
+            ],
+        ]);
+    }
+
+    private function taskBoard(): Collection
+    {
+        return Task::query()
             ->with([
                 'assignee:id,name,github_username',
                 'reviewer:id,name,github_username',
@@ -66,90 +100,68 @@ class TaskController extends Controller
             ->orderByDesc('created_at')
             ->get()
             ->map(fn (Task $task) => $this->serializeTask($task));
+    }
 
-        $selectedTask = null;
-        if ($request->integer('task')) {
-            $selectedTask = Task::query()
-                ->with([
-                    'assignee:id,name,github_username',
-                    'reviewer:id,name,github_username',
-                    'approvedByUser:id,name,github_username',
-                    'sourceInput:id,title,filename,file_disk,file_path,mime_type,file_size,analysis_status',
-                    'project:id,name,workspace_path,url,database_name,database_username,database_password,credential_username,credential_password,base_branch,default_reviewer_user_id',
-                    'project.defaultReviewer:id,name,github_username',
-                    'latestTaskRun' => fn ($query) => $query->select([
-                        'task_runs.id',
-                        'task_runs.task_id',
-                        'task_runs.status',
-                        'task_runs.branch_name',
-                        'task_runs.pull_request_url',
-                        'task_runs.pull_request_number',
-                        'task_runs.review_attempt_count',
-                        'task_runs.workflow_state',
-                    ]),
-                    'latestPullRequestRun' => fn ($query) => $query->select([
-                        'task_runs.id',
-                        'task_runs.task_id',
-                        'task_runs.status',
-                        'task_runs.branch_name',
-                        'task_runs.pull_request_url',
-                        'task_runs.pull_request_number',
-                        'task_runs.review_attempt_count',
-                        'task_runs.workflow_state',
-                    ]),
-                    'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,analyze_source_model,analyze_source_reasoning_effort,plan_model,plan_reasoning_effort,implement_model,implement_reasoning_effort,review_model,review_reasoning_effort,commit_message_model,commit_message_reasoning_effort,updated_at',
-                    'taskRuns.logs:id,task_run_id,level,message,context,created_at',
-                    'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
-                ])
-                ->find($request->integer('task'));
+    private function sourceInputs(): Collection
+    {
+        return InputSource::query()
+            ->whereDate('created_at', today())
+            ->orderByDesc('created_at')
+            ->get(['id', 'title', 'filename', 'file_path', 'mime_type', 'file_size', 'analysis_status'])
+            ->map(fn (InputSource $inputSource): array => [
+                'id' => $inputSource->id,
+                'title' => $inputSource->title,
+                'filename' => $inputSource->filename,
+                'mime_type' => $inputSource->mime_type,
+                'file_size' => $inputSource->file_size,
+                'analysis_status' => $inputSource->analysis_status,
+                'has_file' => $inputSource->hasStoredFile(),
+            ]);
+    }
 
-            if ($selectedTask instanceof Task) {
-                $selectedTask = $this->serializeTask($selectedTask, true);
-            }
+    private function selectedTask(Request $request): ?array
+    {
+        if (! $request->integer('task')) {
+            return null;
         }
 
-        return Inertia::render('tasks/Index', [
-            'tasks' => $tasks,
-            'users' => User::query()->orderBy('name')->get(['id', 'name', 'github_username']),
-            'sourceInputs' => InputSource::query()
-                ->whereDate('created_at', today())
-                ->orderByDesc('created_at')
-                ->get(['id', 'title', 'filename', 'file_path', 'mime_type', 'file_size', 'analysis_status'])
-                ->map(fn (InputSource $inputSource): array => [
-                    'id' => $inputSource->id,
-                    'title' => $inputSource->title,
-                    'filename' => $inputSource->filename,
-                    'mime_type' => $inputSource->mime_type,
-                    'file_size' => $inputSource->file_size,
-                    'analysis_status' => $inputSource->analysis_status,
-                    'has_file' => $inputSource->hasStoredFile(),
+        $task = Task::query()
+            ->with([
+                'assignee:id,name,github_username',
+                'reviewer:id,name,github_username',
+                'approvedByUser:id,name,github_username',
+                'sourceInput:id,title,filename,file_disk,file_path,mime_type,file_size,analysis_status',
+                'project:id,name,workspace_path,url,database_name,database_username,database_password,credential_username,credential_password,base_branch,default_reviewer_user_id',
+                'project.defaultReviewer:id,name,github_username',
+                'latestTaskRun' => fn ($query) => $query->select([
+                    'task_runs.id',
+                    'task_runs.task_id',
+                    'task_runs.status',
+                    'task_runs.branch_name',
+                    'task_runs.pull_request_url',
+                    'task_runs.pull_request_number',
+                    'task_runs.review_attempt_count',
+                    'task_runs.workflow_state',
                 ]),
-            'projects' => Project::query()
-                ->orderBy('name')
-                ->get()
-                ->map(fn (Project $project): array => [
-                    'id' => $project->id,
-                    'name' => (string) $project->name,
-                    'default_reviewer_user_id' => $project->default_reviewer_user_id,
+                'latestPullRequestRun' => fn ($query) => $query->select([
+                    'task_runs.id',
+                    'task_runs.task_id',
+                    'task_runs.status',
+                    'task_runs.branch_name',
+                    'task_runs.pull_request_url',
+                    'task_runs.pull_request_number',
+                    'task_runs.review_attempt_count',
+                    'task_runs.workflow_state',
                 ]),
-            'selectedTask' => $selectedTask,
-            'taskStatuses' => [
-                Task::STATUS_DRAFT,
-                Task::STATUS_PENDING_APPROVAL,
-                Task::STATUS_APPROVED,
-                Task::STATUS_RUNNING,
-                Task::STATUS_PR_CREATED,
-                Task::STATUS_DONE,
-                Task::STATUS_FAILED,
-                Task::STATUS_REJECTED,
-            ],
-            'priorities' => [
-                Task::PRIORITY_LOW,
-                Task::PRIORITY_MEDIUM,
-                Task::PRIORITY_HIGH,
-                Task::PRIORITY_URGENT,
-            ],
-        ]);
+                'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,analyze_source_model,analyze_source_reasoning_effort,plan_model,plan_reasoning_effort,implement_model,implement_reasoning_effort,review_model,review_reasoning_effort,commit_message_model,commit_message_reasoning_effort,updated_at',
+                'taskRuns.logs:id,task_run_id,level,message,context,created_at',
+                'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
+            ])
+            ->find($request->integer('task'));
+
+        return $task instanceof Task
+            ? $this->serializeTask($task, true)
+            : null;
     }
 
     public function store(StoreTaskRequest $request): RedirectResponse

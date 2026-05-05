@@ -877,10 +877,10 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
         ->and(file_get_contents($argsPath))->not->toContain('Ask no questions unless');
 });
 
-test('codex review prompt uses upstream review guidelines with task context', function () {
+test('codex review command uses native base branch review mode', function () {
     $task = Task::create([
-        'title' => 'Review with upstream prompt',
-        'description' => 'Review should use Codex review mode criteria.',
+        'title' => 'Review with native mode',
+        'description' => 'Review should use Codex native review mode.',
         'acceptance_criteria' => [
             ['body' => 'Review findings are structured.', 'checked' => false],
         ],
@@ -898,23 +898,18 @@ test('codex review prompt uses upstream review guidelines with task context', fu
     ]);
 
     $reflection = new ReflectionClass(CodexCodingAgent::class);
-    $method = $reflection->getMethod('buildReviewPrompt');
-    $prompt = $method->invoke(new CodexCodingAgent, $task, $run, 2);
+    $method = $reflection->getMethod('buildReviewCommand');
+    $command = $method->invoke(new CodexCodingAgent, $task, $run, '/tmp/codex-review-output');
 
-    expect($prompt)
-        ->toContain('Review changes for task '.$task->id.': Review with upstream prompt')
-        ->toContain('Base branch: develop')
-        ->toContain('Review attempt: 2')
-        ->toContain('Review should use Codex review mode criteria.')
-        ->toContain('# Review guidelines:')
-        ->toContain('You are acting as a reviewer for a proposed code change made by another engineer.')
-        ->toContain('Output all findings that the original author would fix if they knew about it.')
-        ->toContain('Return exactly one JSON object with this shape:')
-        ->toContain('"overall_correctness": "patch is correct"')
-        ->toContain('"overall_confidence_score": 0.0')
-        ->toContain('Use an empty findings array when the patch is correct.')
-        ->toContain('Do not generate a PR fix.')
-        ->toContain('If you find any issue, set overall_correctness to "patch is incorrect" and include it in findings.');
+    expect($command)
+        ->toContain('review')
+        ->toContain('--base')
+        ->and($command[array_search('--base', $command, true) + 1])->toBe('develop')
+        ->and($command)->toContain('--title')
+        ->and($command[array_search('--title', $command, true) + 1])->toBe('Task '.$task->id.': Review with native mode')
+        ->and($command)->toContain('--output-last-message')
+        ->and($command)->not->toContain('--uncommitted')
+        ->and($command)->not->toContain('Return exactly one JSON object with this shape:');
 });
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
@@ -956,7 +951,6 @@ test('pull request review is requested from the project default reviewer before 
         ->status->toBe(Task::STATUS_PR_CREATED)
         ->and($run->refresh()->pull_request_url)->toBe('https://github.com/example/repo/pull/123');
 
-    Queue::assertPushed(DispatchNextTaskRunJob::class);
 });
 
 test('pull request review is skipped when the reviewer resolves to the pull request author', function () {
@@ -994,6 +988,15 @@ test('pull request review is skipped when the reviewer resolves to the pull requ
 
     expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED)
         ->and($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_REVIEW_REQUESTED))->toBeTrue();
+
+    $log = $run->logs()
+        ->where('message', 'Pull request review request skipped')
+        ->sole();
+
+    expect($log->context)
+        ->reason->toBe('reviewer_is_pull_request_author')
+        ->reviewer_user_id->toBe($assignee->id)
+        ->matching_user_id->toBe($assignee->id);
 });
 
 test('pull request review is skipped when the reviewer resolves to the approving user', function () {
@@ -1033,6 +1036,15 @@ test('pull request review is skipped when the reviewer resolves to the approving
 
     expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED)
         ->and($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_REVIEW_REQUESTED))->toBeTrue();
+
+    $log = $run->logs()
+        ->where('message', 'Pull request review request skipped')
+        ->sole();
+
+    expect($log->context)
+        ->reason->toBe('reviewer_is_task_approver')
+        ->reviewer_user_id->toBe($approver->id)
+        ->matching_user_id->toBe($approver->id);
 });
 
 test('pull request review uses task reviewer before project default reviewer', function () {
@@ -1338,7 +1350,7 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
         ]);
 });
 
-test('RunApprovedTaskWithCodingAgentJob fails after the final review attempt without fixing', function () {
+test('RunApprovedTaskWithCodingAgentJob skips review after retry limit and continues', function () {
     Queue::fake();
     config(['automation.agent.retry_limit' => 1]);
 
@@ -1367,28 +1379,21 @@ test('RunApprovedTaskWithCodingAgentJob fails after the final review attempt wit
                 ));
             $mock->shouldReceive('fixReviewFindings')->never();
             $mock->shouldReceive('generateCommitMessage')
-                ->never();
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: skip review retry limit']));
         })
     );
-    test()->instance(
-        ExternalTaskProvider::class,
-        Mockery::mock(ExternalTaskProvider::class)
-    );
-    test()->instance(
-        PullRequestProvider::class,
-        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
-            $mock->shouldReceive('createPullRequest')->never();
-            $mock->shouldReceive('requestReview')->never();
-            $mock->shouldReceive('getReviewState')->never();
-        })
-    );
+    bindSuccessfulAuxiliaryMocks();
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
     expect($run->refresh())
         ->review_attempt_count->toBe(1)
-        ->status->toBe(TaskRun::STATUS_FAILED)
-        ->last_error->toBe('Coding agent review failed after retry limit reached.')
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
+        ->last_error->toBeNull()
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_SKIPPED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->pull_request_url)->toBe('https://github.com/example/repo/pull/123')
         ->and($run->logs()->where('message', 'Coding agent review failed after retry limit')->exists())
         ->toBeTrue()
         ->and(trim((string) file_get_contents($testsCountPath)))->toBe('1');

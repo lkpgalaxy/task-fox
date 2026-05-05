@@ -12,6 +12,7 @@ export type WorkflowCheckpoint = {
 
 type WorkflowCheckpointVisualState =
     | 'finished'
+    | 'skipped'
     | 'running'
     | 'pending'
     | 'failed';
@@ -51,6 +52,10 @@ const workflowCheckpointVisualState = (
 
     if (checkpoint.status === 'running') {
         return 'running';
+    }
+
+    if (checkpoint.status === 'skipped') {
+        return 'skipped';
     }
 
     if (completedCheckpointStatuses.includes(checkpoint.status)) {
@@ -115,6 +120,9 @@ export function WorkflowTimeline({
                                     visualState === 'finished'
                                         ? 'bg-success/45'
                                         : null,
+                                    visualState === 'skipped'
+                                        ? 'bg-hairline-strong'
+                                        : null,
                                     visualState === 'failed'
                                         ? 'bg-danger/45'
                                         : null,
@@ -131,7 +139,10 @@ export function WorkflowTimeline({
                                     ? 'border-success/50 bg-success/15 text-green-100'
                                     : null,
                                 visualState === 'running'
-                                    ? 'border-primary/60 bg-primary/20 text-indigo-100 ring-2 ring-primary-focus/25'
+                                    ? 'border-primary/60 bg-primary/20 text-indigo-100 ring-2 ring-primary-focus/25 motion-safe:animate-pulse'
+                                    : null,
+                                visualState === 'skipped'
+                                    ? 'border-hairline-strong bg-surface-3 text-ink-subtle'
                                     : null,
                                 visualState === 'pending'
                                     ? 'border-hairline-strong text-ink-tertiary'
@@ -141,11 +152,21 @@ export function WorkflowTimeline({
                                     : null,
                             )}
                         >
-                            {visualState === 'finished'
-                                ? '✓'
-                                : visualState === 'failed'
-                                  ? '!'
-                                  : index + 1}
+                            {visualState === 'running' ? (
+                                <span
+                                    aria-hidden="true"
+                                    className="absolute inset-0 rounded-full bg-primary/30 motion-safe:animate-ping motion-reduce:hidden"
+                                />
+                            ) : null}
+                            <span className="relative z-10">
+                                {checkpoint.status === 'skipped'
+                                    ? '↷'
+                                    : visualState === 'finished'
+                                      ? '✓'
+                                      : visualState === 'failed'
+                                        ? '!'
+                                        : index + 1}
+                            </span>
                         </span>
                         <div
                             className={cn(
