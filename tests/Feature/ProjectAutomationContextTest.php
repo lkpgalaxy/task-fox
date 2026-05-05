@@ -261,7 +261,51 @@ test('failed tasks can be rerun with a fresh queued workflow run', function () {
     );
 });
 
-test('only failed tasks can be rerun', function () {
+test('rejected tasks can be rerun with a fresh queued workflow run', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox-rerun-rejected',
+        'base_branch' => 'develop',
+    ]);
+    $task = Task::create([
+        'title' => 'Rerun rejected workflow',
+        'description' => 'A rejected task should be eligible for a fresh workflow run.',
+        'status' => Task::STATUS_REJECTED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+        'rejected_at' => now(),
+    ]);
+
+    $this->post(route('tasks.rerun-workflow', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Task workflow queued for rerun.');
+
+    $freshRun = TaskRun::query()->sole();
+
+    expect($task->refresh())
+        ->status->toBe(Task::STATUS_APPROVED)
+        ->approved_by_user_id->toBe(auth()->id())
+        ->approved_at->not->toBeNull()
+        ->rejected_at->toBeNull()
+        ->and($freshRun)
+        ->status->toBe(TaskRun::STATUS_QUEUED)
+        ->branch_name->toBe('pending')
+        ->workspace_path->toBe('/tmp/task-fox-rerun-rejected')
+        ->base_branch->toBe('develop')
+        ->attempt_count->toBe(0)
+        ->review_attempt_count->toBe(0)
+        ->and($freshRun->requestHash())->toBe(TaskRun::requestHashForTask($task->refresh()))
+        ->and($freshRun->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+
+    Queue::assertPushed(
+        DispatchNextTaskRunJob::class,
+        fn (DispatchNextTaskRunJob $job): bool => $job->taskId === $task->id,
+    );
+});
+
+test('only failed or rejected tasks can be rerun', function () {
     Queue::fake();
 
     $project = Project::create([
@@ -279,7 +323,7 @@ test('only failed tasks can be rerun', function () {
     $this->post(route('tasks.rerun-workflow', $task))
         ->assertRedirect(route('tasks.index', ['task' => $task->id]))
         ->assertSessionHasErrors([
-            'status' => 'Only failed tasks can be rerun.',
+            'status' => 'Only failed or rejected tasks can be rerun.',
         ]);
 
     expect($task->refresh()->status)->toBe(Task::STATUS_APPROVED)

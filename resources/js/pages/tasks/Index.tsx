@@ -890,7 +890,7 @@ function TaskDetails({
                             Retry failed checkpoint
                         </Button>
                     ) : null}
-                    {task.status === 'failed' ? (
+                    {['failed', 'rejected'].includes(task.status) ? (
                         <Button
                             type="button"
                             variant="danger"

@@ -449,10 +449,10 @@ class TaskController extends Controller
     {
         $task->loadMissing('project');
 
-        if ($task->status !== Task::STATUS_FAILED) {
+        if (! in_array($task->status, [Task::STATUS_FAILED, Task::STATUS_REJECTED], true)) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
-                ->withErrors(['status' => 'Only failed tasks can be rerun.']);
+                ->withErrors(['status' => 'Only failed or rejected tasks can be rerun.']);
         }
 
         if ($task->project_id === null || ! $task->project) {
