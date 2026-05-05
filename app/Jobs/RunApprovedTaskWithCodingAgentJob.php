@@ -162,9 +162,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_PLANNED);
         $run->update(['status' => TaskRun::STATUS_PLANNING]);
 
-        $this->log($run, 'info', 'Coding agent planning started', $this->agentLogContext($run, 'plan'));
+        $startLog = $this->log($run, 'info', 'Coding agent planning started', $this->agentLogContext($run, 'plan'));
 
         $agentResult = $codingAgent->plan($task, $run);
+        $this->mergeAgentCommandContext($startLog, $agentResult);
         $this->logAgentMessages($run, $agentResult);
 
         if (! $agentResult->successful) {
@@ -197,12 +198,13 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED),
             ]);
 
-            $this->log($run, 'info', 'Coding agent invocation started', array_merge(
+            $startLog = $this->log($run, 'info', 'Coding agent invocation started', array_merge(
                 $this->agentLogContext($run, 'implement'),
                 ['attempt' => $attempt],
             ));
 
             $agentResult = $codingAgent->run($task, $run);
+            $this->mergeAgentCommandContext($startLog, $agentResult);
             $this->logAgentMessages($run, $agentResult);
 
             if (! $agentResult->successful) {
@@ -210,6 +212,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
 
             if ($this->runTests($repositoryPath, $run)) {
+                $this->verifyProjectUrl($codingAgent, $task, $run);
                 $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
 
                 return;
@@ -242,6 +245,33 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
             $run->update(['status' => TaskRun::STATUS_PLANNING]);
         }
+    }
+
+    private function verifyProjectUrl(CodingAgent $codingAgent, Task $task, TaskRun $run): void
+    {
+        $projectUrl = trim((string) $task->project?->url);
+        if ($projectUrl === '') {
+            $this->log($run, 'info', 'URL smoke test skipped', [
+                'reason' => 'missing_project_url',
+            ]);
+
+            return;
+        }
+
+        $this->log($run, 'info', 'URL smoke test started', [
+            'project_url' => $projectUrl,
+        ]);
+
+        $agentResult = $codingAgent->smokeTestUrl($task, $run);
+        $this->logAgentMessages($run, $agentResult);
+
+        if (! $agentResult->successful) {
+            throw new Exception((string) $agentResult->error ?: 'URL smoke test failed.');
+        }
+
+        $this->log($run, 'info', 'URL smoke test passed', [
+            'project_url' => $projectUrl,
+        ]);
     }
 
     private function verifyScreenshot(CodingAgent $codingAgent, Task $task, TaskRun $run): void
@@ -754,15 +784,28 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         ];
     }
 
-    private function log(TaskRun $run, string $level, string $message, array $context = []): void
+    private function log(TaskRun $run, string $level, string $message, array $context = []): TaskRunLog
     {
-        TaskRunLog::create([
+        return TaskRunLog::create([
             'task_run_id' => $run->id,
             'level' => $level,
             'message' => $message,
             'context' => array_merge([
                 'coding_agent' => (string) config('automation.coding_agent.driver', 'codex'),
             ], $context),
+        ]);
+    }
+
+    private function mergeAgentCommandContext(TaskRunLog $log, CodingAgentResult $agentResult): void
+    {
+        if (! array_key_exists('command', $agentResult->context)) {
+            return;
+        }
+
+        $log->update([
+            'context' => array_merge($log->context ?? [], [
+                'command' => $agentResult->context['command'],
+            ]),
         ]);
     }
 

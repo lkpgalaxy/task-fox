@@ -34,6 +34,23 @@ class PullRequestStatusRefresher
             DispatchNextTaskRunJob::dispatch();
         }
 
+        if ($state === PullRequestReviewState::CLOSED) {
+            $task->update([
+                'status' => Task::STATUS_REJECTED,
+                'rejected_at' => now(),
+                'approved_at' => null,
+                'approved_by_user_id' => null,
+            ]);
+
+            $run->update([
+                'status' => TaskRun::STATUS_REJECTED,
+                'last_error' => 'Pull request closed.',
+                'finished_at' => now(),
+            ]);
+
+            DispatchNextTaskRunJob::dispatch();
+        }
+
         return $state;
     }
 }

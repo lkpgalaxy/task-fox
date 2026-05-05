@@ -234,6 +234,18 @@ class CodexCodingAgent implements CodingAgent
         );
     }
 
+    public function smokeTestUrl(Task $task, TaskRun $run): CodingAgentResult
+    {
+        return $this->executeTaskCommand(
+            $task,
+            $run,
+            $this->buildUrlSmokeTestPrompt($task),
+            'URL smoke test command completed.',
+            $this->resolveRunSetting($run, 'implement_model'),
+            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+        );
+    }
+
     private function reviewTextHasFindings(string $output): bool
     {
         $normalizedOutput = mb_strtolower(trim($output));
@@ -358,6 +370,28 @@ Instructions:
 5. Do not start the application server or Vite dev server; use the configured project URL.
 6. If the URL is unreachable or screenshot capture is impossible, return a clear failure reason.
 7. Final response must include the screenshot path when captured.
+PROMPT;
+    }
+
+    private function buildUrlSmokeTestPrompt(Task $task): string
+    {
+        $projectUrl = trim((string) $task->project?->url);
+
+        return <<<PROMPT
+Run a Playwright MCP smoke test for task {$task->id}: {$task->title}
+
+Project URL:
+{$projectUrl}
+
+Instructions:
+1. Use Playwright browser tooling to open only the implemented surface for this task, starting from the configured project URL.
+2. Do not crawl the whole application or test unrelated routes, pages, settings, or workflows.
+3. If the configured URL is not the implemented surface, navigate only to the most relevant page under that URL for this task.
+4. Wait for the implemented page or UI state to finish rendering.
+5. Check browser console errors, page errors, failed document requests, and obvious framework error screens for that implemented surface only.
+6. Do not start the application server or Vite dev server; use the configured project URL.
+7. If the implemented surface is unreachable, the wrong application is served, the page shows a backend exception, or browser errors indicate the implemented surface is broken, return a clear failure reason.
+8. Final response must state whether the implementation smoke test passed and mention the URL or page inspected.
 PROMPT;
     }
 

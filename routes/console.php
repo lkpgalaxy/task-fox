@@ -10,5 +10,5 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command(RefreshPullRequestsCommand::class)
-    ->everyTenMinutes()
+    ->everyFiveMinutes()
     ->withoutOverlapping();

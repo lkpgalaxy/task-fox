@@ -1285,6 +1285,13 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
 
                     return new CodingAgentResult(successful: true);
                 });
+            $mock->shouldReceive('smokeTestUrl')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'url-smoke';
+
+                    return new CodingAgentResult(successful: true, messages: ['url smoke passed']);
+                });
             $mock->shouldReceive('captureScreenshot')
                 ->once()
                 ->andReturnUsing(function () use (&$events, $run): CodingAgentResult {
@@ -1313,9 +1320,54 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
-    expect($events)->toBe(['planning', 'implementation', 'screenshot', 'review', 'commit-message', 'pull-request'])
+    expect($events)->toBe(['planning', 'implementation', 'url-smoke', 'screenshot', 'review', 'commit-message', 'pull-request'])
         ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->logs()->where('message', 'URL smoke test passed')->exists())->toBeTrue()
         ->and($run->logs()->where('message', 'Screenshot captured')->exists())->toBeTrue();
+});
+
+test('RunApprovedTaskWithCodingAgentJob fails implementation verification when URL smoke test fails', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'URL smoke failure', null, 'https://app.test');
+    $run = createAutomationRun($task, $repositoryPath, 'task/url-smoke-failure');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Implement before URL smoke.']));
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('smokeTestUrl')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: false, error: 'Page shows a database exception.'));
+            $mock->shouldReceive('captureScreenshot')->never();
+            $mock->shouldReceive('reviewChanges')->never();
+            $mock->shouldReceive('fixReviewFindings')->never();
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
+        ->and($run->last_error)->toBe('Page shows a database exception.')
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
@@ -1403,7 +1455,10 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
                 ));
             $mock->shouldReceive('run')
                 ->once()
-                ->andReturn(new CodingAgentResult(successful: true));
+                ->andReturn(new CodingAgentResult(
+                    successful: true,
+                    context: ['command' => ['codex', 'exec', '[prompt omitted]']],
+                ));
             $mock->shouldReceive('reviewChanges')
                 ->twice()
                 ->andReturn(
@@ -1452,8 +1507,13 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
 
     expect($logs)->toHaveCount(6);
 
-    $expectAgentContext($logsByMessage->get('Coding agent planning started')->sole()->context, 'plan', 'gpt-plan', 'low');
-    $expectAgentContext($logsByMessage->get('Coding agent invocation started')->sole()->context, 'implement', 'gpt-implement', 'medium');
+    $planningStartedContext = $logsByMessage->get('Coding agent planning started')->sole()->context;
+    $invocationStartedContext = $logsByMessage->get('Coding agent invocation started')->sole()->context;
+
+    $expectAgentContext($planningStartedContext, 'plan', 'gpt-plan', 'low');
+    $expectAgentContext($invocationStartedContext, 'implement', 'gpt-implement', 'medium');
+    expect($planningStartedContext['command'])->toBe(['codex', 'exec', '[prompt omitted]'])
+        ->and($invocationStartedContext['command'])->toBe(['codex', 'exec', '[prompt omitted]']);
     $logsByMessage->get('Coding agent review started')->each(
         fn (TaskRunLog $log) => $expectAgentContext($log->context, 'review', 'gpt-review', 'high'),
     );
@@ -2243,6 +2303,50 @@ test('refresh pull request uses the latest pull request bearing task run', funct
 
     expect($task->refresh()->status)->toBe(Task::STATUS_DONE)
         ->and($pullRequestRun->refresh()->status)->toBe(TaskRun::STATUS_DONE);
+});
+
+test('refresh pull request marks closed pull requests as rejected', function () {
+    Queue::fake();
+
+    $task = Task::create([
+        'title' => 'Refresh closed PR manually',
+        'description' => 'Manual refresh should reject closed pull requests.',
+        'status' => Task::STATUS_PR_CREATED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'approved_at' => now(),
+    ]);
+    $pullRequestRun = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_WAITING_FOR_MERGE,
+        'branch_name' => 'task/manual-closed-pr',
+        'pull_request_url' => 'https://github.com/example/repo/pull/58',
+        'pull_request_number' => 58,
+    ]);
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('getReviewState')
+                ->once()
+                ->with('https://github.com/example/repo/pull/58')
+                ->andReturn(PullRequestReviewState::CLOSED);
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+        })
+    );
+
+    $this->post(route('tasks.refresh-pr', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHas('status', 'Pull request state is closed.');
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_REJECTED)
+        ->and($task->rejected_at)->not->toBeNull()
+        ->and($task->approved_at)->toBeNull()
+        ->and($pullRequestRun->refresh()->status)->toBe(TaskRun::STATUS_REJECTED)
+        ->and($pullRequestRun->last_error)->toBe('Pull request closed.')
+        ->and($pullRequestRun->finished_at)->not->toBeNull();
+
+    Queue::assertPushed(DispatchNextTaskRunJob::class);
 });
 
 test('task run logs remain attached to their task run', function () {

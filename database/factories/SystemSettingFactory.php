@@ -18,15 +18,15 @@ class SystemSettingFactory extends Factory
     public function definition(): array
     {
         return [
-            'analyze_source_model' => 'gpt-5.4',
+            'analyze_source_model' => 'gpt-5.3-codex-spark',
             'analyze_source_reasoning_effort' => 'medium',
-            'plan_model' => 'gpt-5.5',
+            'plan_model' => 'gpt-5.3-codex-spark',
             'plan_reasoning_effort' => 'high',
-            'implement_model' => 'gpt-5.5',
+            'implement_model' => 'gpt-5.3-codex-spark',
             'implement_reasoning_effort' => 'medium',
-            'review_model' => 'gpt-5.5',
+            'review_model' => 'gpt-5.3-codex-spark',
             'review_reasoning_effort' => 'high',
-            'commit_message_model' => 'gpt-5.4-mini',
+            'commit_message_model' => 'gpt-5.3-codex-spark',
             'commit_message_reasoning_effort' => 'medium',
             'retry_limit' => 3,
         ];
