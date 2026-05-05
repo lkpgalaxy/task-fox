@@ -2,15 +2,15 @@
 
 namespace App\Jobs;
 
-use App\Models\AiRun;
 use App\Models\Task;
+use App\Models\TaskRun;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 
-class DispatchNextAiRunJob implements ShouldQueue
+class DispatchNextTaskRunJob implements ShouldQueue
 {
     use Dispatchable;
     use Queueable;
@@ -20,20 +20,20 @@ class DispatchNextAiRunJob implements ShouldQueue
 
     public function handle(): void
     {
-        $lock = Cache::lock('automation:dispatch-next-ai-run', 10);
+        $lock = Cache::lock('automation:dispatch-next-task-run', 10);
 
         if (! $lock->get()) {
             return;
         }
 
         try {
-            $activeRunQuery = AiRun::query()->whereIn('status', AiRun::ACTIVE_STATUSES);
+            $activeRunQuery = TaskRun::query()->whereIn('status', TaskRun::ACTIVE_STATUSES);
 
             if ($this->taskId !== null) {
                 $activeRunQuery->where(function ($query): void {
                     $query
                         ->where('task_id', '!=', $this->taskId)
-                        ->orWhere('status', '!=', AiRun::STATUS_QUEUED);
+                        ->orWhere('status', '!=', TaskRun::STATUS_QUEUED);
                 });
             }
 
@@ -68,21 +68,19 @@ class DispatchNextAiRunJob implements ShouldQueue
                 ? (string) $task->project?->base_branch
                 : 'main';
 
-            $resumableRun = $task->aiRuns()
-                ->whereIn('status', [AiRun::STATUS_FAILED, AiRun::STATUS_QUEUED])
+            $resumableRun = $task->taskRuns()
+                ->whereIn('status', [TaskRun::STATUS_FAILED, TaskRun::STATUS_QUEUED])
                 ->latest('id')
                 ->get()
-                ->first(function (AiRun $run) use ($task): bool {
+                ->first(function (TaskRun $run) use ($task): bool {
                     return $run->requestHash() !== null && $run->hasMatchingRequestHash($task);
                 });
 
-            if ($resumableRun instanceof AiRun) {
+            if ($resumableRun instanceof TaskRun) {
                 $resumableRun->update([
-                    'status' => AiRun::STATUS_QUEUED,
+                    'status' => TaskRun::STATUS_QUEUED,
                     'last_error' => null,
                     'finished_at' => null,
-                    'project_id' => $task->project_id,
-                    'repository_path' => $workspacePath,
                     'workspace_path' => $workspacePath,
                     'base_branch' => $baseBranch,
                 ]);
@@ -92,13 +90,11 @@ class DispatchNextAiRunJob implements ShouldQueue
                 return;
             }
 
-            $run = $task->aiRuns()->create([
-                'status' => AiRun::STATUS_QUEUED,
+            $run = $task->taskRuns()->create([
+                'status' => TaskRun::STATUS_QUEUED,
                 'attempt_count' => 0,
                 'review_attempt_count' => 0,
                 'branch_name' => 'pending',
-                'project_id' => $task->project_id,
-                'repository_path' => $workspacePath,
                 'workspace_path' => $workspacePath,
                 'base_branch' => $baseBranch,
             ]);

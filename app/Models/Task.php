@@ -23,8 +23,6 @@ use Illuminate\Database\Query\Builder;
     'approved_by_user_id',
     'approved_at',
     'rejected_at',
-    'pull_request_url',
-    'pull_request_number',
 ])]
 class Task extends Model
 {
@@ -76,19 +74,30 @@ class Task extends Model
     }
 
     /**
-     * @return HasMany<int, AiRun>
+     * @return HasMany<int, TaskRun>
      */
-    public function aiRuns(): HasMany
+    public function taskRuns(): HasMany
     {
-        return $this->hasMany(AiRun::class);
+        return $this->hasMany(TaskRun::class);
     }
 
     /**
-     * @return HasOne<int, AiRun>
+     * @return HasOne<int, TaskRun>
      */
-    public function latestAiRun(): HasOne
+    public function latestTaskRun(): HasOne
     {
-        return $this->hasOne(AiRun::class)->latestOfMany('id');
+        return $this->hasOne(TaskRun::class)->latestOfMany('id');
+    }
+
+    /**
+     * @return HasOne<int, TaskRun>
+     */
+    public function latestPullRequestRun(): HasOne
+    {
+        return $this->hasOne(TaskRun::class)->ofMany(
+            ['id' => 'max'],
+            fn ($query) => $query->whereNotNull('pull_request_url'),
+        );
     }
 
     /**

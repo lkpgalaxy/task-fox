@@ -5,15 +5,15 @@ namespace App\Services\PullRequests;
 use App\Contracts\PullRequestProvider;
 use App\DataTransferObjects\PullRequestResult;
 use App\Enums\PullRequestReviewState;
-use App\Models\AiRun;
 use App\Models\Task;
+use App\Models\TaskRun;
 use App\Models\User;
 use Exception;
 use Symfony\Component\Process\Process;
 
 class GithubPullRequestProvider implements PullRequestProvider
 {
-    public function createPullRequest(Task $task, AiRun $run, ?User $author = null): PullRequestResult
+    public function createPullRequest(Task $task, TaskRun $run, ?User $author = null): PullRequestResult
     {
         $body = $this->buildPrBody($task);
         $repositoryPath = $this->resolveRepositoryPath($run);
@@ -193,13 +193,9 @@ BODY;
         return $path !== null && $path !== '' ? $path : base_path();
     }
 
-    private function resolveRepositoryPath(AiRun $run): string
+    private function resolveRepositoryPath(TaskRun $run): string
     {
-        if ($run->workspace_path === null || $run->workspace_path === '') {
-            return $this->resolveExecutionPath($run->repository_path);
-        }
-
-        return $run->workspace_path;
+        return $this->resolveExecutionPath($run->workspace_path);
     }
 
     /**

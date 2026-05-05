@@ -38,6 +38,7 @@ This project has domain-specific skills available in `**/skills/**`. You MUST ac
 - Use descriptive names for variables and methods. For example, `isRegisteredForDiscounts`, not `discount()`.
 - Check for existing components to reuse before writing a new one.
 - When implementing UI, you must follow the design direction, patterns, and constraints defined in `DESIGN.md`.
+- Display dates in `dd/mm/yyyy` format.
 
 ## Verification Scripts
 

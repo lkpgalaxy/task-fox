@@ -3,10 +3,10 @@
 use App\Contracts\Agent;
 use App\DataTransferObjects\CodingAgentResult;
 use App\Jobs\AnalyzeInputSourceJob;
-use App\Models\AiRunLog;
 use App\Models\InputSource;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskRunLog;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -131,18 +131,18 @@ test('it uses the agent analysis to create pending approval tasks', function () 
         ->and($agent->projectSummaries[0])->not->toHaveKey('database_password')
         ->and($agent->projectSummaries[0])->not->toHaveKey('credential_password');
 
-    expect(AiRunLog::query()->where('input_source_id', $source->id)->pluck('message')->all())->toBe([
+    expect(TaskRunLog::query()->where('input_source_id', $source->id)->pluck('message')->all())->toBe([
         'Input source analysis started',
         'Input source analysis completed',
     ]);
 
-    $completedLog = AiRunLog::query()
+    $completedLog = TaskRunLog::query()
         ->where('input_source_id', $source->id)
         ->where('message', 'Input source analysis completed')
         ->firstOrFail();
 
     expect($completedLog)
-        ->ai_run_id->toBeNull()
+        ->task_run_id->toBeNull()
         ->level->toBe('info')
         ->and($completedLog->context)->toMatchArray([
             'agent' => 'codex',

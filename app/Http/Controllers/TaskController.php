@@ -7,12 +7,12 @@ use App\Contracts\PullRequestProvider;
 use App\Enums\PullRequestReviewState;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
-use App\Jobs\DispatchNextAiRunJob;
-use App\Models\AiRun;
-use App\Models\AiRunLog;
+use App\Jobs\DispatchNextTaskRunJob;
 use App\Models\InputSource;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskRun;
+use App\Models\TaskRunLog;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -41,15 +41,25 @@ class TaskController extends Controller
                 'sourceInput:id,title,filename,file_disk,file_path,mime_type,file_size,analysis_status',
                 'project:id,name,workspace_path,url,database_name,database_username,database_password,credential_username,credential_password,base_branch,default_reviewer_user_id',
                 'project.defaultReviewer:id,name,github_username',
-                'latestAiRun' => fn ($query) => $query->select([
-                    'ai_runs.id',
-                    'ai_runs.task_id',
-                    'ai_runs.status',
-                    'ai_runs.branch_name',
-                    'ai_runs.pull_request_url',
-                    'ai_runs.pull_request_number',
-                    'ai_runs.review_attempt_count',
-                    'ai_runs.workflow_state',
+                'latestTaskRun' => fn ($query) => $query->select([
+                    'task_runs.id',
+                    'task_runs.task_id',
+                    'task_runs.status',
+                    'task_runs.branch_name',
+                    'task_runs.pull_request_url',
+                    'task_runs.pull_request_number',
+                    'task_runs.review_attempt_count',
+                    'task_runs.workflow_state',
+                ]),
+                'latestPullRequestRun' => fn ($query) => $query->select([
+                    'task_runs.id',
+                    'task_runs.task_id',
+                    'task_runs.status',
+                    'task_runs.branch_name',
+                    'task_runs.pull_request_url',
+                    'task_runs.pull_request_number',
+                    'task_runs.review_attempt_count',
+                    'task_runs.workflow_state',
                 ]),
                 'externalTaskLink:id,task_id,external_task_provider,external_task_id,external_url',
             ])
@@ -67,8 +77,28 @@ class TaskController extends Controller
                     'sourceInput:id,title,filename,file_disk,file_path,mime_type,file_size,analysis_status',
                     'project:id,name,workspace_path,url,database_name,database_username,database_password,credential_username,credential_password,base_branch,default_reviewer_user_id',
                     'project.defaultReviewer:id,name,github_username',
-                    'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,updated_at',
-                    'aiRuns.logs:id,ai_run_id,level,message,context,created_at',
+                    'latestTaskRun' => fn ($query) => $query->select([
+                        'task_runs.id',
+                        'task_runs.task_id',
+                        'task_runs.status',
+                        'task_runs.branch_name',
+                        'task_runs.pull_request_url',
+                        'task_runs.pull_request_number',
+                        'task_runs.review_attempt_count',
+                        'task_runs.workflow_state',
+                    ]),
+                    'latestPullRequestRun' => fn ($query) => $query->select([
+                        'task_runs.id',
+                        'task_runs.task_id',
+                        'task_runs.status',
+                        'task_runs.branch_name',
+                        'task_runs.pull_request_url',
+                        'task_runs.pull_request_number',
+                        'task_runs.review_attempt_count',
+                        'task_runs.workflow_state',
+                    ]),
+                    'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,updated_at',
+                    'taskRuns.logs:id,task_run_id,level,message,context,created_at',
                     'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
                 ])
                 ->find($request->integer('task'));
@@ -291,7 +321,7 @@ class TaskController extends Controller
             }
         }
 
-        DispatchNextAiRunJob::dispatch();
+        DispatchNextTaskRunJob::dispatch();
 
         return redirect()
             ->route('tasks.index')
@@ -330,7 +360,7 @@ class TaskController extends Controller
 
     public function retry(Task $task): RedirectResponse
     {
-        $task->loadMissing('aiRuns');
+        $task->loadMissing('taskRuns');
 
         if ($task->status !== Task::STATUS_FAILED) {
             return redirect()
@@ -352,15 +382,15 @@ class TaskController extends Controller
                 ->withErrors(['actor' => 'No actor available to record retry approval.']);
         }
 
-        $run = $task->aiRuns()
-            ->where('status', AiRun::STATUS_FAILED)
+        $run = $task->taskRuns()
+            ->where('status', TaskRun::STATUS_FAILED)
             ->latest('id')
             ->get()
-            ->first(function (AiRun $candidate) use ($task): bool {
+            ->first(function (TaskRun $candidate) use ($task): bool {
                 return $candidate->requestHash() !== null && $candidate->hasMatchingRequestHash($task);
             });
 
-        if (! $run instanceof AiRun) {
+        if (! $run instanceof TaskRun) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
                 ->withErrors(['retry' => 'This failed task has changed since its last resumable run. Submit it for approval to start a new run.']);
@@ -371,12 +401,10 @@ class TaskController extends Controller
             'approved_by_user_id' => $actor->id,
             'approved_at' => now(),
             'rejected_at' => null,
-            'pull_request_url' => null,
-            'pull_request_number' => null,
         ]);
 
         $run->update([
-            'status' => AiRun::STATUS_QUEUED,
+            'status' => TaskRun::STATUS_QUEUED,
             'last_error' => null,
             'finished_at' => null,
         ]);
@@ -391,7 +419,7 @@ class TaskController extends Controller
             );
         }
 
-        DispatchNextAiRunJob::dispatch($task->id);
+        DispatchNextTaskRunJob::dispatch($task->id);
 
         return redirect()
             ->route('tasks.index', ['task' => $task->id])
@@ -400,26 +428,28 @@ class TaskController extends Controller
 
     public function createPullRequest(Task $task): RedirectResponse
     {
-        $task->loadMissing(['assignee', 'reviewer', 'externalTaskLink', 'latestAiRun', 'project.defaultReviewer']);
+        $task->loadMissing(['assignee', 'reviewer', 'externalTaskLink', 'latestTaskRun', 'latestPullRequestRun', 'project.defaultReviewer']);
         $actor = $this->resolveCurrentUser();
 
-        if ($task->pull_request_url) {
+        if ($task->latestPullRequestRun) {
+            $task->update(['status' => Task::STATUS_PR_CREATED]);
+
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
                 ->withErrors(['pull_request' => 'This task already has a pull request.']);
         }
 
-        $run = $task->latestAiRun;
+        $run = $task->latestTaskRun;
         if (! $run) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
-                ->withErrors(['pull_request' => 'No AI run is available for this task.']);
+                ->withErrors(['pull_request' => 'No task run is available for this task.']);
         }
 
         if ($run->branch_name === null || $run->branch_name === '') {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
-                ->withErrors(['pull_request' => 'The latest AI run does not have a branch to open.']);
+                ->withErrors(['pull_request' => 'The latest task run does not have a branch to open.']);
         }
 
         if (! $actor || trim((string) $actor->email) === '' || ! $this->hasGithubUsername($actor) || ! $this->hasGithubToken($actor)) {
@@ -431,30 +461,22 @@ class TaskController extends Controller
         }
 
         if ($run->pull_request_url) {
-            $task->update([
-                'status' => Task::STATUS_PR_CREATED,
-                'pull_request_url' => $run->pull_request_url,
-                'pull_request_number' => $run->pull_request_number,
-            ]);
+            $task->update(['status' => Task::STATUS_PR_CREATED]);
 
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
-                ->with('status', 'Task pull request was synced from the latest AI run.');
+                ->with('status', 'Task pull request was synced from the latest task run.');
         }
 
         try {
-            $run->update(['status' => AiRun::STATUS_CREATING_PR]);
+            $run->update(['status' => TaskRun::STATUS_CREATING_PR]);
 
             $pr = $this->pullRequestProvider->createPullRequest($task, $run, $actor);
 
-            $task->update([
-                'status' => Task::STATUS_PR_CREATED,
-                'pull_request_url' => $pr->url,
-                'pull_request_number' => $pr->number,
-            ]);
+            $task->update(['status' => Task::STATUS_PR_CREATED]);
 
             $run->update([
-                'status' => AiRun::STATUS_WAITING_FOR_MERGE,
+                'status' => TaskRun::STATUS_WAITING_FOR_MERGE,
                 'pull_request_url' => $pr->url,
                 'pull_request_number' => $pr->number,
                 'last_error' => null,
@@ -478,7 +500,7 @@ class TaskController extends Controller
                 $this->externalTaskProvider->attachPullRequest($task->externalTaskLink, $pr->url);
             }
 
-            $this->recordAiRunLog($run, 'info', 'Pull request created manually', [
+            $this->recordTaskRunLog($run, 'info', 'Pull request created manually', [
                 'pull_request_url' => $pr->url,
             ]);
 
@@ -487,12 +509,12 @@ class TaskController extends Controller
                 ->with('status', 'Pull request created.');
         } catch (Throwable $exception) {
             $run->update([
-                'status' => AiRun::STATUS_FAILED,
+                'status' => TaskRun::STATUS_FAILED,
                 'last_error' => $exception->getMessage(),
                 'finished_at' => now(),
             ]);
 
-            $this->recordAiRunLog($run, 'error', 'Manual pull request creation failed', [
+            $this->recordTaskRunLog($run, 'error', 'Manual pull request creation failed', [
                 'error' => $exception->getMessage(),
             ]);
 
@@ -509,22 +531,21 @@ class TaskController extends Controller
 
     public function refreshPr(Task $task): RedirectResponse
     {
-        if (! $task->pull_request_url) {
+        $task->loadMissing('latestPullRequestRun');
+        $run = $task->latestPullRequestRun;
+
+        if (! $run || ! $run->pull_request_url) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
                 ->withErrors(['pull_request' => 'No pull request URL available for this task.']);
         }
 
-        $state = $this->pullRequestProvider->getReviewState($task->pull_request_url);
+        $state = $this->pullRequestProvider->getReviewState($run->pull_request_url);
 
         if ($state === PullRequestReviewState::MERGED) {
             $task->update(['status' => Task::STATUS_DONE]);
 
-            AiRun::query()
-                ->where('task_id', $task->id)
-                ->whereIn('status', [AiRun::STATUS_WAITING_FOR_MERGE, AiRun::STATUS_CREATING_PR])
-                ->latest('id')
-                ->update(['status' => AiRun::STATUS_DONE, 'finished_at' => now()]);
+            $run->update(['status' => TaskRun::STATUS_DONE, 'finished_at' => now()]);
         }
 
         return redirect()
@@ -574,8 +595,6 @@ class TaskController extends Controller
             'approved_at' => $task->approved_at?->toIso8601String(),
             'rejected_at' => $task->rejected_at?->toIso8601String(),
             'project_id' => $task->project_id,
-            'pull_request_url' => $task->pull_request_url,
-            'pull_request_number' => $task->pull_request_number,
             'assignee' => optional($task->assignee)->only(['id', 'name', 'github_username']),
             'reviewer' => optional($task->reviewer)->only(['id', 'name', 'github_username']),
             'approved_by_user' => optional($task->approvedByUser)->only(['id', 'name', 'github_username']),
@@ -599,7 +618,8 @@ class TaskController extends Controller
             'acceptance_criteria' => $this->normalizeCriteria($task->acceptance_criteria ?? []),
             'created_at' => $task->created_at?->toIso8601String(),
             'updated_at' => $task->updated_at?->toIso8601String(),
-            'latest_ai_run' => optional($task->latestAiRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number', 'workflow_state']),
+            'latest_task_run' => optional($task->latestTaskRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number', 'workflow_state']),
+            'latest_pull_request_run' => optional($task->latestPullRequestRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number', 'workflow_state']),
             'external_task_link' => optional($task->externalTaskLink)?->only([
                 'id',
                 'external_task_provider',
@@ -612,13 +632,12 @@ class TaskController extends Controller
             return $result;
         }
 
-        $result['ai_runs'] = $task->aiRuns->map(
+        $result['task_runs'] = $task->taskRuns->map(
             fn ($run) => [
                 'id' => $run->id,
                 'status' => $run->status,
                 'branch_name' => $run->branch_name,
                 'plan' => $run->plan,
-                'test_cases' => $run->test_cases,
                 'pull_request_url' => $run->pull_request_url,
                 'pull_request_number' => $run->pull_request_number,
                 'attempt_count' => $run->attempt_count,
@@ -675,10 +694,10 @@ class TaskController extends Controller
     /**
      * @param  array<string, mixed>  $context
      */
-    private function recordAiRunLog(AiRun $run, string $level, string $message, array $context = []): void
+    private function recordTaskRunLog(TaskRun $run, string $level, string $message, array $context = []): void
     {
-        AiRunLog::create([
-            'ai_run_id' => $run->id,
+        TaskRunLog::create([
+            'task_run_id' => $run->id,
             'level' => $level,
             'message' => $message,
             'context' => array_merge([

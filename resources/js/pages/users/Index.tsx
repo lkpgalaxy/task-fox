@@ -16,6 +16,7 @@ import {
     Td,
     Th,
 } from '@/components/ui';
+import { formatDisplayDateTime } from '@/lib/utils';
 import users from '@/routes/users';
 
 type UserRecord = {
@@ -54,18 +55,6 @@ const emptyForm = (): UserFormData => ({
     password: '',
     password_confirmation: '',
 });
-
-const formatDate = (value: string | null): string => {
-    if (!value) {
-        return 'None';
-    }
-
-    try {
-        return new Date(value).toLocaleString();
-    } catch {
-        return value;
-    }
-};
 
 export default function UsersIndex() {
     const { users: userRows, roles, errors } = usePage<PageProps>().props;
@@ -195,7 +184,7 @@ export default function UsersIndex() {
                                     </Badge>
                                 </Td>
                                 <Td className="text-ink-subtle">
-                                    {formatDate(user.created_at)}
+                                    {formatDisplayDateTime(user.created_at)}
                                 </Td>
                                 <Td>
                                     <div className="flex flex-wrap gap-2">

@@ -1,13 +1,13 @@
 <?php
 
 use App\Http\Controllers\Admin\UserController;
-use App\Http\Controllers\AiRunLogController;
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InputSourceController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\TaskController;
+use App\Http\Controllers\TaskRunLogController;
 use Illuminate\Support\Facades\Route;
 
 Route::middleware('guest')->group(function (): void {
@@ -42,7 +42,7 @@ Route::middleware(['auth', 'enabled'])->group(function (): void {
     Route::get('/input-sources', [InputSourceController::class, 'index'])->name('input-sources.index');
     Route::post('/input/analyze', [InputSourceController::class, 'store'])->name('input-sources.store');
     Route::get('/input-sources/{inputSource}/preview', [InputSourceController::class, 'preview'])->name('input-sources.preview');
-    Route::get('/logs', [AiRunLogController::class, 'index'])->name('logs.index');
+    Route::get('/logs', [TaskRunLogController::class, 'index'])->name('logs.index');
 
     Route::middleware('can:manage-users')->group(function (): void {
         Route::get('/users', [UserController::class, 'index'])->name('users.index');

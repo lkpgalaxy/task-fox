@@ -6,8 +6,8 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['ai_run_id', 'input_source_id', 'level', 'message', 'context'])]
-class AiRunLog extends Model
+#[Fillable(['task_run_id', 'input_source_id', 'level', 'message', 'context'])]
+class TaskRunLog extends Model
 {
     /**
      * @return array<string, string>
@@ -20,11 +20,11 @@ class AiRunLog extends Model
     }
 
     /**
-     * @return BelongsTo<int, AiRun>
+     * @return BelongsTo<int, TaskRun>
      */
-    public function aiRun(): BelongsTo
+    public function taskRun(): BelongsTo
     {
-        return $this->belongsTo(AiRun::class);
+        return $this->belongsTo(TaskRun::class);
     }
 
     /**

@@ -41,14 +41,6 @@ class Project extends Model
     }
 
     /**
-     * @return HasMany<int, AiRun>
-     */
-    public function aiRuns(): HasMany
-    {
-        return $this->hasMany(AiRun::class);
-    }
-
-    /**
      * @return BelongsTo<User, Project>
      */
     public function defaultReviewer(): BelongsTo

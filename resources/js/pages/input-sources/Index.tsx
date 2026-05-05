@@ -12,6 +12,7 @@ import {
     Th,
 } from '@/components/ui';
 import { UploadSourceAction } from '@/components/upload-source-modal';
+import { formatDisplayDateTime } from '@/lib/utils';
 import inputSources from '@/routes/input-sources';
 
 type SourceRecord = {
@@ -64,18 +65,6 @@ const formatFileSize = (size: number | null): string => {
     }
 
     return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-};
-
-const formatDate = (value: string | null): string => {
-    if (!value) {
-        return 'None';
-    }
-
-    try {
-        return new Date(value).toLocaleString();
-    } catch {
-        return value;
-    }
 };
 
 const safeJson = (value: unknown): string | null => {
@@ -171,7 +160,7 @@ export default function InputSourcesIndex() {
                                     </p>
                                 </Td>
                                 <Td className="text-ink-subtle">
-                                    {formatDate(source.created_at)}
+                                    {formatDisplayDateTime(source.created_at)}
                                 </Td>
                                 <Td>
                                     {source.has_file ? (

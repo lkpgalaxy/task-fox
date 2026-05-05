@@ -3,10 +3,10 @@
 namespace App\Jobs;
 
 use App\Contracts\TaskExtractor;
-use App\Models\AiRunLog;
 use App\Models\InputSource;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskRunLog;
 use App\Models\User;
 use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -154,7 +154,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
      */
     private function log(InputSource $inputSource, string $level, string $message, array $context = []): void
     {
-        AiRunLog::create([
+        TaskRunLog::create([
             'input_source_id' => $inputSource->id,
             'level' => $level,
             'message' => $message,

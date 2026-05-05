@@ -11,9 +11,10 @@ import {
     Td,
     Th,
 } from '@/components/ui';
+import { formatDisplayDateTime } from '@/lib/utils';
 import tasks from '@/routes/tasks';
 
-type AiRunLogEntry = {
+type TaskRunLogEntry = {
     id: number;
     level: string;
     message: string;
@@ -28,7 +29,7 @@ type AiRunLogEntry = {
 };
 
 type LogsPageProps = {
-    logs: AiRunLogEntry[];
+    logs: TaskRunLogEntry[];
 };
 
 const safeJson = (value: unknown): string | null => {
@@ -52,7 +53,7 @@ export default function LogsIndex() {
 
     return (
         <AppShell
-            title="AI run logs"
+            title="Task run logs"
             description="Centralized execution logs for task runs and external tooling messages."
         >
             <Head title="Logs" />
@@ -73,7 +74,9 @@ export default function LogsIndex() {
                     {logs.map((log) => (
                         <tr key={log.id} className="hover:bg-surface-2/60">
                             <Td className="text-ink-subtle">
-                                {log.created_at ?? 'None'}
+                                <time dateTime={log.created_at ?? undefined}>
+                                    {formatDisplayDateTime(log.created_at)}
+                                </time>
                             </Td>
                             <Td>
                                 <Badge value={log.level}>{log.level}</Badge>

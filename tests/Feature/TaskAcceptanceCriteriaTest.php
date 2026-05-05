@@ -1,9 +1,9 @@
 <?php
 
-use App\Models\AiRun;
 use App\Models\InputSource;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskRun;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use App\Services\PullRequests\GithubPullRequestProvider;
@@ -320,11 +320,10 @@ test('github pull request creation parses gh create url output', function () {
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
-    $run = AiRun::create([
+    $run = TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_CREATING_PR,
+        'status' => TaskRun::STATUS_CREATING_PR,
         'branch_name' => 'task/create-pr',
-        'repository_path' => $workspacePath,
         'workspace_path' => $workspacePath,
     ]);
 
@@ -393,11 +392,10 @@ test('github pull request creation falls back to inherited gh auth without a tok
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
-    $run = AiRun::create([
+    $run = TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_CREATING_PR,
+        'status' => TaskRun::STATUS_CREATING_PR,
         'branch_name' => 'task/create-pr',
-        'repository_path' => $workspacePath,
         'workspace_path' => $workspacePath,
     ]);
 
@@ -473,11 +471,10 @@ test('codex agent prompt renders acceptance criteria from the task json column',
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
-    $run = AiRun::create([
+    $run = TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_IMPLEMENTING,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
         'branch_name' => 'task/test',
-        'repository_path' => base_path(),
     ]);
     $binPath = sys_get_temp_dir().'/task-fox-codex-'.uniqid();
     $argsPath = $binPath.'/args.txt';
@@ -555,11 +552,10 @@ test('codex agent refuses to implement tasks without acceptance criteria', funct
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
-    $run = AiRun::create([
+    $run = TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_IMPLEMENTING,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
         'branch_name' => 'task/unclear',
-        'repository_path' => base_path(),
     ]);
     $binPath = sys_get_temp_dir().'/task-fox-codex-unused-'.uniqid();
     $argsPath = $binPath.'/args.txt';
@@ -578,7 +574,7 @@ test('codex agent refuses to implement tasks without acceptance criteria', funct
         ->and(file_exists($argsPath))->toBeFalse();
 });
 
-test('ai run request hash ignores acceptance criteria checked state', function () {
+test('task run request hash ignores acceptance criteria checked state', function () {
     $task = Task::create([
         'title' => 'Retry verified work',
         'description' => 'Checked state can change during verification.',
@@ -589,11 +585,10 @@ test('ai run request hash ignores acceptance criteria checked state', function (
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
 
-    $run = AiRun::create([
+    $run = TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_FAILED,
+        'status' => TaskRun::STATUS_FAILED,
         'branch_name' => 'task/retry-verified-work',
-        'repository_path' => base_path(),
     ]);
     $run->initializeWorkflowState($task);
 
@@ -606,7 +601,7 @@ test('ai run request hash ignores acceptance criteria checked state', function (
     expect($run->refresh()->hasMatchingRequestHash($task->refresh()))->toBeTrue();
 });
 
-test('task index loads latest ai run without ambiguous columns', function () {
+test('task index loads latest task run without ambiguous columns', function () {
     $this->withoutVite();
 
     $task = Task::create([
@@ -616,14 +611,59 @@ test('task index loads latest ai run without ambiguous columns', function () {
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
 
-    AiRun::create([
+    TaskRun::create([
         'task_id' => $task->id,
-        'status' => AiRun::STATUS_IMPLEMENTING,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
         'branch_name' => 'task/review-implementation',
-        'repository_path' => base_path(),
     ]);
 
     $this->get(route('tasks.index'))->assertOk();
+});
+
+test('task index reads pull request data from the latest pull request bearing task run', function () {
+    $this->withoutVite();
+
+    $task = Task::create([
+        'title' => 'Keep older PR visible',
+        'description' => 'A newer run without a PR should not hide the latest PR run.',
+        'status' => Task::STATUS_RUNNING,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_WAITING_FOR_MERGE,
+        'branch_name' => 'task/with-pr',
+        'pull_request_url' => 'https://github.com/example/repo/pull/77',
+        'pull_request_number' => 77,
+    ]);
+
+    TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'task/newer-without-pr',
+    ]);
+
+    $this->get(route('tasks.index'))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('tasks/Index')
+            ->where('tasks.0.latest_task_run.branch_name', 'task/newer-without-pr')
+            ->where('tasks.0.latest_task_run.pull_request_url', null)
+            ->where('tasks.0.latest_pull_request_run.pull_request_url', 'https://github.com/example/repo/pull/77')
+            ->where('tasks.0.latest_pull_request_run.pull_request_number', 77)
+            ->missing('tasks.0.pull_request_url')
+            ->missing('tasks.0.pull_request_number')
+        );
+});
+
+test('automation schema keeps execution state off tasks and project ids off task runs', function () {
+    expect(Schema::hasColumn('tasks', 'pull_request_url'))->toBeFalse()
+        ->and(Schema::hasColumn('tasks', 'pull_request_number'))->toBeFalse()
+        ->and(Schema::hasColumn('task_runs', 'project_id'))->toBeFalse()
+        ->and(Schema::hasColumn('task_runs', 'test_cases'))->toBeFalse()
+        ->and(Schema::hasColumn('task_run_logs', 'task_run_id'))->toBeTrue()
+        ->and(Schema::hasColumn('task_run_logs', 'ai_run_id'))->toBeFalse();
 });
 
 test('task index only lists input sources created today', function () {

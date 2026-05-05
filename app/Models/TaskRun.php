@@ -11,12 +11,9 @@ use Illuminate\Support\Collection;
 
 #[Fillable([
     'task_id',
-    'project_id',
     'status',
     'plan',
-    'test_cases',
     'branch_name',
-    'repository_path',
     'workspace_path',
     'base_branch',
     'pull_request_url',
@@ -28,7 +25,7 @@ use Illuminate\Support\Collection;
     'started_at',
     'finished_at',
 ])]
-class AiRun extends Model
+class TaskRun extends Model
 {
     public const CHECKPOINT_REPOSITORY_PREPARED = 'repository_prepared';
 
@@ -107,7 +104,6 @@ class AiRun extends Model
     protected function casts(): array
     {
         return [
-            'test_cases' => 'array',
             'workflow_state' => 'array',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
@@ -120,19 +116,11 @@ class AiRun extends Model
     }
 
     /**
-     * @return BelongsTo<Project, AiRun>
-     */
-    public function project(): BelongsTo
-    {
-        return $this->belongsTo(Project::class);
-    }
-
-    /**
-     * @return HasMany<int, AiRunLog>
+     * @return HasMany<int, TaskRunLog>
      */
     public function logs(): HasMany
     {
-        return $this->hasMany(AiRunLog::class);
+        return $this->hasMany(TaskRunLog::class);
     }
 
     public function isActive(): bool
@@ -362,22 +350,5 @@ class AiRun extends Model
 
         $this->forceFill(['workflow_state' => $state])->save();
         $this->refresh();
-    }
-
-    /**
-     * @return list<array<string, mixed>>
-     */
-    public function flattenedTestCases(): array
-    {
-        $cases = $this->test_cases;
-
-        if (! is_array($cases)) {
-            return [];
-        }
-
-        return (new Collection($cases))
-            ->filter(static fn (array $case): bool => isset($case['name']))
-            ->values()
-            ->all();
     }
 }

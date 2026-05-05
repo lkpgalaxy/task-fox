@@ -23,7 +23,7 @@ import {
     workflowCurrentCheckpoint,
 } from '@/components/workflow-timeline';
 import type { WorkflowCheckpoint } from '@/components/workflow-timeline';
-import { cn } from '@/lib/utils';
+import { cn, formatDisplayDate, formatDisplayDateTime } from '@/lib/utils';
 import inputSources from '@/routes/input-sources';
 import profile from '@/routes/profile';
 import tasks from '@/routes/tasks';
@@ -70,12 +70,11 @@ type WorkflowState = {
     checkpoints?: WorkflowCheckpoint[];
 };
 
-type AiRunRecord = {
+type TaskRunRecord = {
     id: number;
     status: string;
     branch_name: string | null;
     plan: string | null;
-    test_cases: unknown;
     pull_request_url: string | null;
     pull_request_number: number | null;
     attempt_count: number;
@@ -117,8 +116,6 @@ type TaskRecord = {
     approved_by_user_id: number | null;
     approved_at: string | null;
     rejected_at: string | null;
-    pull_request_url: string | null;
-    pull_request_number: number | null;
     assignee: TaskRelation | null;
     reviewer: TaskRelation | null;
     approved_by_user: TaskRelation | null;
@@ -127,7 +124,15 @@ type TaskRecord = {
     acceptance_criteria: Criterion[];
     created_at: string | null;
     updated_at: string | null;
-    latest_ai_run: {
+    latest_task_run: {
+        id: number;
+        status: string;
+        branch_name: string | null;
+        pull_request_url: string | null;
+        pull_request_number: number | null;
+        workflow_state: WorkflowState | null;
+    } | null;
+    latest_pull_request_run: {
         id: number;
         status: string;
         branch_name: string | null;
@@ -141,7 +146,7 @@ type TaskRecord = {
         external_task_id: string;
         external_url: string;
     } | null;
-    ai_runs?: AiRunRecord[];
+    task_runs?: TaskRunRecord[];
     external_messages?: {
         id: number;
         type: string;
@@ -235,18 +240,6 @@ const sanitizeCriteria = (criteria: Criterion[]): Criterion[] => {
     return next.length > 0
         ? next
         : [{ ...emptyCriterion(), body: 'No acceptance criteria provided.' }];
-};
-
-const formatDate = (value: string | null): string => {
-    if (!value) {
-        return 'None';
-    }
-
-    try {
-        return new Date(value).toLocaleString();
-    } catch {
-        return value;
-    }
 };
 
 const setStatus = (value: boolean | undefined): string =>
@@ -812,9 +805,9 @@ function TaskCard({
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-tertiary">
                 <Badge>{taskPriorityLabel(task.priority)}</Badge>
                 {task.project ? <Badge>{task.project.name}</Badge> : null}
-                {task.latest_ai_run ? (
-                    <Badge value={task.latest_ai_run.status}>
-                        run {taskStatusLabel(task.latest_ai_run.status)}
+                {task.latest_task_run ? (
+                    <Badge value={task.latest_task_run.status}>
+                        run {taskStatusLabel(task.latest_task_run.status)}
                     </Badge>
                 ) : null}
             </div>
@@ -841,16 +834,17 @@ function TaskDetails({
     onCreatePr: () => void;
     onRefreshPr: () => void;
 }) {
+    const latestPullRequestRun = task.latest_pull_request_run;
     const canAttemptPrCreation =
-        !task.pull_request_url && task.latest_ai_run !== null;
+        latestPullRequestRun === null && task.latest_task_run !== null;
     const createPrDisabled =
-        task.latest_ai_run?.branch_name === null ||
-        task.latest_ai_run?.branch_name === undefined ||
-        task.latest_ai_run.branch_name === '';
-    const aiRuns = [...(task.ai_runs ?? [])].sort((first, second) => {
+        task.latest_task_run?.branch_name === null ||
+        task.latest_task_run?.branch_name === undefined ||
+        task.latest_task_run.branch_name === '';
+    const taskRuns = [...(task.task_runs ?? [])].sort((first, second) => {
         return second.id - first.id;
     });
-    const latestRun = aiRuns[0] ?? null;
+    const latestRun = taskRuns[0] ?? null;
     const latestWorkflow = latestRun?.workflow_state ?? null;
     const latestCheckpoints = latestWorkflow?.checkpoints ?? [];
     const currentCheckpoint = workflowCurrentCheckpoint(latestCheckpoints);
@@ -870,9 +864,9 @@ function TaskDetails({
                         {taskStatusLabel(task.status)}
                     </Badge>
                     <Badge>{taskPriorityLabel(task.priority)} priority</Badge>
-                    {task.latest_ai_run ? (
-                        <Badge value={task.latest_ai_run.status}>
-                            Run {taskStatusLabel(task.latest_ai_run.status)}
+                    {task.latest_task_run ? (
+                        <Badge value={task.latest_task_run.status}>
+                            Run {taskStatusLabel(task.latest_task_run.status)}
                         </Badge>
                     ) : null}
                 </div>
@@ -933,7 +927,7 @@ function TaskDetails({
                             Retry
                         </Button>
                     ) : null}
-                    {task.pull_request_url ? (
+                    {latestPullRequestRun ? (
                         <Button type="button" onClick={onRefreshPr}>
                             Refresh PR
                         </Button>
@@ -944,7 +938,7 @@ function TaskDetails({
                             variant="success"
                             title={
                                 createPrDisabled
-                                    ? 'The latest AI run does not have a branch to open.'
+                                    ? 'The latest task run does not have a branch to open.'
                                     : undefined
                             }
                             disabled={createPrDisabled}
@@ -958,7 +952,9 @@ function TaskDetails({
 
             <div className="grid gap-3 sm:grid-cols-2">
                 <DetailItem label="Deadline">
-                    {task.deadline ?? 'No deadline'}
+                    {task.deadline
+                        ? formatDisplayDate(task.deadline)
+                        : 'No deadline'}
                 </DetailItem>
                 <DetailItem label="Assignee">
                     {task.assignee?.name ?? 'Unassigned'}
@@ -1006,24 +1002,24 @@ function TaskDetails({
                     )}
                 </DetailItem>
                 <DetailItem label="Latest PR">
-                    {task.pull_request_url ? (
+                    {latestPullRequestRun?.pull_request_url ? (
                         <ActionLink
-                            href={task.pull_request_url}
+                            href={latestPullRequestRun.pull_request_url}
                             target="_blank"
                             rel="noreferrer"
                             className="min-h-0 px-2 py-1 text-xs"
                         >
-                            #{task.pull_request_number}
+                            #{latestPullRequestRun.pull_request_number}
                         </ActionLink>
                     ) : (
                         'None'
                     )}
                 </DetailItem>
                 <DetailItem label="Created">
-                    {formatDate(task.created_at)}
+                    {formatDisplayDateTime(task.created_at)}
                 </DetailItem>
                 <DetailItem label="Updated">
-                    {formatDate(task.updated_at)}
+                    {formatDisplayDateTime(task.updated_at)}
                 </DetailItem>
             </div>
 
@@ -1073,7 +1069,7 @@ function TaskDetails({
                         ) : null}
                         <WorkflowTimeline
                             checkpoints={latestCheckpoints}
-                            formatDate={formatDate}
+                            formatDate={formatDisplayDateTime}
                         />
                     </div>
                 ) : (
@@ -1116,91 +1112,125 @@ function TaskDetails({
 
             <Panel className="p-4">
                 <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-ink">AI runs</h3>
+                    <h3 className="text-sm font-semibold text-ink">
+                        Task runs
+                    </h3>
                     <span className="text-xs text-ink-subtle">
-                        {aiRuns.length} total, latest first
+                        {taskRuns.length} total, latest first
                     </span>
                 </div>
-                {aiRuns.length ? (
+                {taskRuns.length ? (
                     <div className="space-y-3">
-                        {aiRuns.map((run, index) => (
-                            <div
+                        {taskRuns.map((run, index) => (
+                            <details
                                 key={run.id}
-                                className="rounded-md border border-hairline bg-surface-2 p-3"
+                                className="group rounded-md border border-hairline bg-surface-2"
                             >
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <p className="text-sm font-medium text-ink">
+                                <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 p-3 marker:hidden">
+                                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                        <span className="text-xs text-ink-tertiary transition group-open:rotate-90">
+                                            &gt;
+                                        </span>
+                                        <span className="text-sm font-medium text-ink">
                                             Run #{run.id}
-                                        </p>
+                                        </span>
                                         {index === 0 ? (
                                             <Badge>Latest</Badge>
                                         ) : null}
+                                        <Badge value={run.status}>
+                                            {taskStatusLabel(run.status)}
+                                        </Badge>
                                     </div>
-                                    <Badge value={run.status}>
-                                        {taskStatusLabel(run.status)}
-                                    </Badge>
-                                </div>
-                                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-subtle">
                                     <span>
-                                        Branch: {run.branch_name ?? 'None'}
+                                        <span className="max-w-full truncate text-xs text-ink-subtle">
+                                            {run.branch_name ?? 'No branch'}
+                                        </span>
                                     </span>
-                                    <span>Attempts: {run.attempt_count}</span>
-                                    <span>
-                                        Reviews: {run.review_attempt_count}
-                                    </span>
-                                </div>
-                                <div className="mt-3">
-                                    <WorkflowTimeline
-                                        checkpoints={
-                                            run.workflow_state?.checkpoints ??
-                                            []
-                                        }
-                                        formatDate={formatDate}
-                                    />
-                                </div>
-                                {run.pull_request_url ? (
-                                    <p className="mt-2 truncate text-xs text-ink-subtle">
-                                        PR:{' '}
-                                        <a
-                                            href={run.pull_request_url}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            className="text-primary-hover underline"
-                                        >
-                                            {run.pull_request_url}
-                                        </a>
-                                    </p>
-                                ) : null}
-                                {run.last_error ? (
-                                    <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 p-2 text-xs text-red-100">
-                                        Error: {run.last_error}
-                                    </p>
-                                ) : null}
-                                <details className="mt-3">
-                                    <summary className="cursor-pointer text-xs font-medium text-ink-muted">
-                                        Run logs
-                                    </summary>
-                                    {run.logs.length ? (
-                                        <ul className="mt-2 space-y-1 text-xs">
-                                            {run.logs.map((log) => (
-                                                <li
-                                                    key={log.id}
-                                                    className="rounded border border-hairline bg-surface-1 p-2"
-                                                >
-                                                    <span className="font-mono text-ink-muted">
-                                                        {log.message}
-                                                    </span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    ) : (
-                                        <p className="mt-2 text-xs text-ink-subtle">
-                                            No logs for this run.
+                                </summary>
+                                <div className="border-t border-hairline px-3 pt-3 pb-3">
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-subtle">
+                                        <span>
+                                            Branch: {run.branch_name ?? 'None'}
+                                        </span>
+                                        <span>
+                                            Attempts: {run.attempt_count}
+                                        </span>
+                                        <span>
+                                            Reviews: {run.review_attempt_count}
+                                        </span>
+                                    </div>
+                                    <div className="mt-3">
+                                        <WorkflowTimeline
+                                            checkpoints={
+                                                run.workflow_state
+                                                    ?.checkpoints ?? []
+                                            }
+                                            formatDate={formatDisplayDateTime}
+                                        />
+                                    </div>
+                                    <div className="mt-3 rounded-md border border-hairline bg-surface-1 p-3">
+                                        <p className="text-xs font-medium text-ink-muted">
+                                            Plan
                                         </p>
-                                    )}
-                                </details>
-                            </div>
+                                        <p className="mt-2 text-xs leading-5 whitespace-pre-wrap text-ink-subtle">
+                                            {run.plan?.trim() ||
+                                                'No plan recorded.'}
+                                        </p>
+                                    </div>
+                                    {run.pull_request_url ? (
+                                        <p className="mt-2 truncate text-xs text-ink-subtle">
+                                            PR:{' '}
+                                            <a
+                                                href={run.pull_request_url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="text-primary-hover underline"
+                                            >
+                                                {run.pull_request_url}
+                                            </a>
+                                        </p>
+                                    ) : null}
+                                    {run.last_error ? (
+                                        <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 p-2 text-xs text-red-100">
+                                            Error: {run.last_error}
+                                        </p>
+                                    ) : null}
+                                    <div className="mt-3">
+                                        <p className="text-xs font-medium text-ink-muted">
+                                            Run logs
+                                        </p>
+                                        {run.logs.length ? (
+                                            <ul className="mt-2 space-y-1 text-xs">
+                                                {run.logs.map((log) => (
+                                                    <li
+                                                        key={log.id}
+                                                        className="flex items-start justify-between gap-3 rounded border border-hairline bg-surface-1 p-2"
+                                                    >
+                                                        <span className="min-w-0 font-mono text-ink-muted">
+                                                            {log.message}
+                                                        </span>
+                                                        <time
+                                                            dateTime={
+                                                                log.created_at ??
+                                                                undefined
+                                                            }
+                                                            className="shrink-0 text-ink-tertiary"
+                                                        >
+                                                            {formatDisplayDateTime(
+                                                                log.created_at,
+                                                            )}
+                                                        </time>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        ) : (
+                                            <p className="mt-2 text-xs text-ink-subtle">
+                                                No logs for this run.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            </details>
                         ))}
                     </div>
                 ) : (

@@ -4,9 +4,9 @@ namespace App\Services\CodingAgents;
 
 use App\Contracts\CodingAgent;
 use App\DataTransferObjects\CodingAgentResult;
-use App\Models\AiRun;
 use App\Models\InputSource;
 use App\Models\Task;
+use App\Models\TaskRun;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
@@ -22,7 +22,7 @@ class CodexCodingAgent implements CodingAgent
         private readonly array $context = [],
     ) {}
 
-    public function run(Task $task, AiRun $run): CodingAgentResult
+    public function run(Task $task, TaskRun $run): CodingAgentResult
     {
         if ($this->acceptanceCriteria($task)->isEmpty()) {
             return new CodingAgentResult(
@@ -72,7 +72,7 @@ class CodexCodingAgent implements CodingAgent
         );
     }
 
-    public function reviewChanges(Task $task, AiRun $run, int $attempt): CodingAgentResult
+    public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult
     {
         return $this->executeTaskCommand(
             $task,
@@ -82,7 +82,7 @@ class CodexCodingAgent implements CodingAgent
         );
     }
 
-    public function generateCommitMessage(Task $task, AiRun $run): CodingAgentResult
+    public function generateCommitMessage(Task $task, TaskRun $run): CodingAgentResult
     {
         $result = $this->executeTaskCommand(
             $task,
@@ -149,7 +149,7 @@ Acceptance-criteria-driven workflow:
 PROMPT;
     }
 
-    private function buildReviewPrompt(Task $task, AiRun $run, int $attempt): string
+    private function buildReviewPrompt(Task $task, TaskRun $run, int $attempt): string
     {
         $baseBranch = $run->base_branch ?: 'main';
 
@@ -326,7 +326,7 @@ No stored file metadata is available for this input source.
 PAYLOAD;
     }
 
-    private function buildCommand(Task $task, AiRun $run, string $prompt): array
+    private function buildCommand(Task $task, TaskRun $run, string $prompt): array
     {
         $repositoryPath = $this->resolveWorkspacePath($run);
 
@@ -340,7 +340,7 @@ PAYLOAD;
         ];
     }
 
-    private function executeTaskCommand(Task $task, AiRun $run, string $prompt, string $successMessage): CodingAgentResult
+    private function executeTaskCommand(Task $task, TaskRun $run, string $prompt, string $successMessage): CodingAgentResult
     {
         $command = $this->buildCommand($task, $run, $prompt);
         $repositoryPath = $this->resolveWorkspacePath($run);
@@ -424,14 +424,10 @@ PAYLOAD;
         return 'codex';
     }
 
-    private function resolveWorkspacePath(AiRun $run): string
+    private function resolveWorkspacePath(TaskRun $run): string
     {
         if ($run->workspace_path !== null && $run->workspace_path !== '') {
             return $run->workspace_path;
-        }
-
-        if ($run->repository_path !== null && $run->repository_path !== '') {
-            return $run->repository_path;
         }
 
         return base_path();

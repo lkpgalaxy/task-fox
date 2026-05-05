@@ -3,14 +3,14 @@
 namespace App\Contracts;
 
 use App\DataTransferObjects\CodingAgentResult;
-use App\Models\AiRun;
 use App\Models\Task;
+use App\Models\TaskRun;
 
 interface CodingAgent extends Agent
 {
-    public function run(Task $task, AiRun $run): CodingAgentResult;
+    public function run(Task $task, TaskRun $run): CodingAgentResult;
 
-    public function reviewChanges(Task $task, AiRun $run, int $attempt): CodingAgentResult;
+    public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult;
 
-    public function generateCommitMessage(Task $task, AiRun $run): CodingAgentResult;
+    public function generateCommitMessage(Task $task, TaskRun $run): CodingAgentResult;
 }
