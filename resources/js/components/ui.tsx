@@ -113,6 +113,10 @@ const badgeClasses: Record<string, string> = {
     error: 'border-danger/35 bg-danger/12 text-red-100',
     debug: 'border-hairline-strong bg-surface-3 text-ink-subtle',
     notice: 'border-hairline-strong bg-surface-3 text-ink-subtle',
+    low: 'border-info/35 bg-info/10 text-blue-100',
+    medium: 'border-warning/35 bg-warning/10 text-yellow-100',
+    high: 'border-danger/35 bg-danger/12 text-red-100',
+    urgent: 'border-danger/55 bg-danger/20 text-red-100',
 };
 
 export function Badge({

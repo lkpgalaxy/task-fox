@@ -803,7 +803,9 @@ function TaskCard({
                 {task.description || 'No description'}
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-tertiary">
-                <Badge>{taskPriorityLabel(task.priority)}</Badge>
+                <Badge value={task.priority}>
+                    {taskPriorityLabel(task.priority)}
+                </Badge>
                 {task.project ? <Badge>{task.project.name}</Badge> : null}
                 {task.latest_task_run ? (
                     <Badge value={task.latest_task_run.status}>
@@ -863,7 +865,9 @@ function TaskDetails({
                     <Badge value={task.status}>
                         {taskStatusLabel(task.status)}
                     </Badge>
-                    <Badge>{taskPriorityLabel(task.priority)} priority</Badge>
+                    <Badge value={task.priority}>
+                        {taskPriorityLabel(task.priority)} priority
+                    </Badge>
                     {task.latest_task_run ? (
                         <Badge value={task.latest_task_run.status}>
                             Run {taskStatusLabel(task.latest_task_run.status)}
