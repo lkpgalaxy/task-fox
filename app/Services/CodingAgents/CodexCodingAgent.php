@@ -315,6 +315,10 @@ class CodexCodingAgent implements CodingAgent
         $criteria = $this->acceptanceCriteria($task);
         $plan = trim((string) $run->plan);
         $planBlock = $plan !== '' ? $plan : 'No stored implementation plan was recorded.';
+        $previousFailure = trim((string) $run->last_error);
+        $previousFailureBlock = $previousFailure !== ''
+            ? "Previous verification failure:\n".$this->limitPromptText($previousFailure, 12000)
+            : 'Previous verification failure: none recorded.';
 
         $criteriaList = $criteria->isEmpty()
             ? '- No acceptance criteria were provided.'
@@ -338,6 +342,8 @@ Acceptance criteria:
 Stored implementation plan:
 {$planBlock}
 
+{$previousFailureBlock}
+
 Plan-following instructions:
 - Follow the stored implementation plan above as the implementation contract for this run.
 - Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.
@@ -350,10 +356,12 @@ Acceptance-criteria-driven workflow:
 5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
 6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
 7. Do not start the application or dev server for screenshots; screenshot verification runs in a separate workflow step.
-8. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
-9. Fix failing tests instead of ignoring them.
-10. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
-11. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+8. If a previous verification failure is recorded, diagnose that failure first and make the smallest code, test, config, or migration fix needed before continuing.
+9. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+10. If tests fail because the database schema is stale or missing tables, inspect the test database configuration and run the appropriate Laravel migration or test database setup command before changing unrelated code.
+11. Fix failing tests instead of ignoring them.
+12. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
+13. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
 PROMPT;
     }
 

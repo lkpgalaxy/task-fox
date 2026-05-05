@@ -217,7 +217,11 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
 
             if ($attempt >= $maxAttempts) {
-                throw new Exception('Tests failed after retry limit reached.');
+                $testFailure = trim((string) $run->refresh()->last_error);
+
+                throw new Exception($testFailure !== ''
+                    ? "Tests failed after retry limit reached.\n\n{$testFailure}"
+                    : 'Tests failed after retry limit reached.');
             }
 
             $this->log($run, 'warning', 'Tests failed; retrying', [
@@ -387,15 +391,57 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     {
         $command = (string) config('automation.tests.command', 'php artisan test --compact');
         $process = $this->runProcess($command, $path);
+        $failureOutput = $this->formatTestFailure($command, $process);
 
         $run->update(['status' => TaskRun::STATUS_TESTING]);
 
         $this->log($run, 'info', 'Test command executed', [
             'command' => $command,
             'exit_code' => $process->getExitCode(),
+            'stdout' => $this->limitProcessOutput($process->getOutput()),
+            'stderr' => $this->limitProcessOutput($process->getErrorOutput()),
         ]);
 
-        return $process->isSuccessful();
+        if ($process->isSuccessful()) {
+            $run->update(['last_error' => null]);
+
+            return true;
+        }
+
+        $run->update(['last_error' => $failureOutput]);
+
+        return false;
+    }
+
+    private function formatTestFailure(string $command, Process $process): string
+    {
+        $sections = [
+            "Verification command failed: {$command}",
+            'Exit code: '.(string) $process->getExitCode(),
+        ];
+
+        $output = trim($process->getOutput());
+        if ($output !== '') {
+            $sections[] = "STDOUT:\n".$this->limitProcessOutput($output, 8000);
+        }
+
+        $errorOutput = trim($process->getErrorOutput());
+        if ($errorOutput !== '') {
+            $sections[] = "STDERR:\n".$this->limitProcessOutput($errorOutput, 8000);
+        }
+
+        return implode("\n\n", $sections);
+    }
+
+    private function limitProcessOutput(string $output, int $limit = 6000): string
+    {
+        $output = trim($output);
+
+        if (Str::length($output) <= $limit) {
+            return $output;
+        }
+
+        return Str::substr($output, 0, $limit)."\n\n[truncated]";
     }
 
     private function markAcceptanceCriteriaVerified(Task $task, TaskRun $run): void

@@ -526,6 +526,7 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         'status' => TaskRun::STATUS_IMPLEMENTING,
         'branch_name' => 'task/workflow',
         'plan' => 'Inspect the workflow and update the implementation.',
+        'last_error' => "Verification command failed: php artisan test --compact\n\nSTDERR:\nSQLSTATE[HY000]: General error: 1 no such table: sessions",
     ]);
     $prompt = $method->invoke(new CodexCodingAgent, $task, $run);
 
@@ -533,6 +534,8 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Acceptance-criteria-driven workflow:')
         ->toContain('Stored implementation plan:')
         ->toContain('Inspect the workflow and update the implementation.')
+        ->toContain('Previous verification failure:')
+        ->toContain('no such table: sessions')
         ->toContain('Follow the stored implementation plan above as the implementation contract for this run.')
         ->toContain('Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.')
         ->toContain('1. [ ] List criteria before implementation.')
@@ -544,6 +547,8 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Pest feature/unit tests so each acceptance criterion has direct coverage')
         ->toContain('run TypeScript/lint checks for React/Inertia changes')
         ->toContain('screenshot verification runs in a separate workflow step')
+        ->toContain('diagnose that failure first')
+        ->toContain('database schema is stale or missing tables')
         ->toContain('vendor/bin/pint --dirty --format agent')
         ->toContain('php artisan test --compact')
         ->toContain('Fix failing tests instead of ignoring them')

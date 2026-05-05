@@ -1123,6 +1123,54 @@ test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempt
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
 });
 
+test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retry diagnosis', function () {
+    Queue::fake();
+    config([
+        'automation.agent.retry_limit' => 1,
+        'automation.tests.command' => 'php -r \'fwrite(STDERR, "SQLSTATE[HY000]: General error: 1 no such table: sessions\n"); exit(2);\'',
+    ]);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Store failed test output');
+    $run = createAutomationRun($task, $repositoryPath, 'task/store-failed-test-output');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Implement and verify.']));
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')->never();
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(ExternalTaskProvider::class, Mockery::mock(ExternalTaskProvider::class));
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    $testLogContext = $run->logs()->where('message', 'Test command executed')->first()?->context ?? [];
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->last_error)
+        ->toContain('Tests failed after retry limit reached.')
+        ->toContain('Verification command failed:')
+        ->toContain('Exit code: 2')
+        ->toContain('no such table: sessions')
+        ->and($testLogContext['stderr'] ?? '')
+        ->toContain('no such table: sessions');
+});
+
 test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria before commit', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
