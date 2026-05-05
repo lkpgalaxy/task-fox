@@ -27,7 +27,17 @@ class DispatchNextAiRunJob implements ShouldQueue
         }
 
         try {
-            if (AiRun::query()->whereIn('status', AiRun::ACTIVE_STATUSES)->exists()) {
+            $activeRunQuery = AiRun::query()->whereIn('status', AiRun::ACTIVE_STATUSES);
+
+            if ($this->taskId !== null) {
+                $activeRunQuery->where(function ($query): void {
+                    $query
+                        ->where('task_id', '!=', $this->taskId)
+                        ->orWhere('status', '!=', AiRun::STATUS_QUEUED);
+                });
+            }
+
+            if ($activeRunQuery->exists()) {
                 return;
             }
 
@@ -53,8 +63,13 @@ class DispatchNextAiRunJob implements ShouldQueue
 
             $task->update(['status' => Task::STATUS_RUNNING]);
 
+            $workspacePath = (string) $task->project?->workspace_path;
+            $baseBranch = trim((string) $task->project?->base_branch) !== ''
+                ? (string) $task->project?->base_branch
+                : 'main';
+
             $resumableRun = $task->aiRuns()
-                ->where('status', AiRun::STATUS_FAILED)
+                ->whereIn('status', [AiRun::STATUS_FAILED, AiRun::STATUS_QUEUED])
                 ->latest('id')
                 ->get()
                 ->first(function (AiRun $run) use ($task): bool {
@@ -66,17 +81,16 @@ class DispatchNextAiRunJob implements ShouldQueue
                     'status' => AiRun::STATUS_QUEUED,
                     'last_error' => null,
                     'finished_at' => null,
+                    'project_id' => $task->project_id,
+                    'repository_path' => $workspacePath,
+                    'workspace_path' => $workspacePath,
+                    'base_branch' => $baseBranch,
                 ]);
 
                 RunApprovedTaskWithCodingAgentJob::dispatch($resumableRun->id);
 
                 return;
             }
-
-            $workspacePath = (string) $task->project?->workspace_path;
-            $baseBranch = trim((string) $task->project?->base_branch) !== ''
-                ? (string) $task->project?->base_branch
-                : 'main';
 
             $run = $task->aiRuns()->create([
                 'status' => AiRun::STATUS_QUEUED,

@@ -148,6 +148,11 @@ test('failed tasks can be retried and queued for execution', function () {
         ->pull_request_url->toBeNull()
         ->pull_request_number->toBeNull();
 
+    expect($run->refresh())
+        ->status->toBe(AiRun::STATUS_QUEUED)
+        ->last_error->toBeNull()
+        ->finished_at->toBeNull();
+
     Queue::assertPushed(
         DispatchNextAiRunJob::class,
         fn (DispatchNextAiRunJob $job): bool => $job->taskId === $task->id,
@@ -200,7 +205,8 @@ test('dispatch reuses the latest failed resumable ai run and preserves logs', fu
 
     $project = Project::create([
         'name' => 'Task Fox',
-        'workspace_path' => '/tmp/task-fox',
+        'workspace_path' => '/tmp/task-fox-current',
+        'base_branch' => 'develop',
     ]);
     $task = Task::create([
         'title' => 'Reuse failed run',
@@ -217,8 +223,8 @@ test('dispatch reuses the latest failed resumable ai run and preserves logs', fu
         'project_id' => $project->id,
         'status' => AiRun::STATUS_FAILED,
         'branch_name' => 'ai-task-'.$task->id.'-old',
-        'repository_path' => '/tmp/task-fox',
-        'workspace_path' => '/tmp/task-fox',
+        'repository_path' => '/tmp/task-fox-old',
+        'workspace_path' => '/tmp/task-fox-old',
         'base_branch' => 'main',
     ]);
     $historicalRun->initializeWorkflowState($task);
@@ -227,8 +233,8 @@ test('dispatch reuses the latest failed resumable ai run and preserves logs', fu
         'project_id' => $project->id,
         'status' => AiRun::STATUS_FAILED,
         'branch_name' => 'ai-task-'.$task->id.'-reuse-failed-run',
-        'repository_path' => '/tmp/task-fox',
-        'workspace_path' => '/tmp/task-fox',
+        'repository_path' => '/tmp/task-fox-old',
+        'workspace_path' => '/tmp/task-fox-old',
         'base_branch' => 'main',
     ]);
     $run->initializeWorkflowState($task);
@@ -243,7 +249,53 @@ test('dispatch reuses the latest failed resumable ai run and preserves logs', fu
 
     expect(AiRun::query()->count())->toBe(2)
         ->and($run->refresh()->status)->toBe(AiRun::STATUS_QUEUED)
+        ->and($run->repository_path)->toBe('/tmp/task-fox-current')
+        ->and($run->workspace_path)->toBe('/tmp/task-fox-current')
+        ->and($run->base_branch)->toBe('develop')
         ->and($run->logs()->where('message', 'Previous failure')->exists())->toBeTrue();
+
+    Queue::assertPushed(
+        RunApprovedTaskWithCodingAgentJob::class,
+        fn (RunApprovedTaskWithCodingAgentJob $job): bool => $job->aiRunId === $run->id,
+    );
+});
+
+test('dispatch starts a queued resumable retry run for the selected task', function () {
+    Queue::fake();
+
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox-current',
+        'base_branch' => 'develop',
+    ]);
+    $task = Task::create([
+        'title' => 'Start queued retry',
+        'description' => 'Retry queued run should not block itself.',
+        'acceptance_criteria' => [
+            ['body' => 'Queued retry is dispatched.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'project_id' => $project->id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => 'ai-task-'.$task->id.'-start-queued-retry',
+        'repository_path' => '/tmp/task-fox-old',
+        'workspace_path' => '/tmp/task-fox-old',
+        'base_branch' => 'main',
+    ]);
+    $run->initializeWorkflowState($task);
+
+    app()->call([new DispatchNextAiRunJob($task->id), 'handle']);
+
+    expect(AiRun::query()->count())->toBe(1)
+        ->and($task->refresh()->status)->toBe(Task::STATUS_RUNNING)
+        ->and($run->refresh()->status)->toBe(AiRun::STATUS_QUEUED)
+        ->and($run->repository_path)->toBe('/tmp/task-fox-current')
+        ->and($run->base_branch)->toBe('develop');
 
     Queue::assertPushed(
         RunApprovedTaskWithCodingAgentJob::class,
@@ -545,7 +597,7 @@ test('pull request review is requested from the project default reviewer before 
     Queue::assertPushed(DispatchNextAiRunJob::class);
 });
 
-test('pull request review falls back to the task assignee when no default reviewer is configured', function () {
+test('pull request review is skipped when the reviewer resolves to the pull request author', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
 
@@ -557,9 +609,9 @@ test('pull request review falls back to the task assignee when no default review
     ]);
     $task = Task::create([
         'title' => 'Open reviewed PR',
-        'description' => 'Assignee should be requested.',
+        'description' => 'Assignee cannot review their own pull request.',
         'acceptance_criteria' => [
-            ['body' => 'Assignee receives the review request.', 'checked' => false],
+            ['body' => 'Self-review requests are skipped.', 'checked' => false],
         ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
@@ -575,11 +627,52 @@ test('pull request review falls back to the task assignee when no default review
         'base_branch' => 'main',
     ]);
 
-    bindSuccessfulRunMocks($assignee, $assignee);
+    bindSuccessfulRunMocksWithoutReview($assignee);
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
-    expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED);
+    expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED)
+        ->and($run->refresh()->isCheckpointComplete(AiRun::CHECKPOINT_REVIEW_REQUESTED))->toBeTrue();
+});
+
+test('pull request review is skipped when the reviewer resolves to the approving user', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    runSuccessfulProcess(['git', 'checkout', '-b', 'task/resume-reviewed-pr'], $repositoryPath);
+    $approver = User::factory()->create(['github_username' => 'approver-login']);
+    $project = Project::create([
+        'name' => 'Review Project',
+        'workspace_path' => $repositoryPath,
+        'default_reviewer_user_id' => $approver->id,
+    ]);
+    $task = Task::create([
+        'title' => 'Open reviewed PR',
+        'description' => 'Approver cannot review their own pull request.',
+        'acceptance_criteria' => [
+            ['body' => 'Approver review requests are skipped.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'approved_by_user_id' => $approver->id,
+        'project_id' => $project->id,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => 'task/approver-reviewer',
+        'repository_path' => $repositoryPath,
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+
+    bindSuccessfulRunMocksWithoutReview();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED)
+        ->and($run->refresh()->isCheckpointComplete(AiRun::CHECKPOINT_REVIEW_REQUESTED))->toBeTrue();
 });
 
 test('pull request review uses task reviewer before project default reviewer', function () {
@@ -907,6 +1000,83 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
         ->and($run->isCheckpointComplete(AiRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue();
 });
 
+test('AI run retries the failed checkpoint before the next pending checkpoint', function () {
+    $task = Task::create([
+        'title' => 'Retry failed checkpoint',
+        'description' => 'Retry should resume the failed checkpoint.',
+        'acceptance_criteria' => [
+            ['body' => 'The failed checkpoint is retried first.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => 'task/retry-failed-checkpoint',
+        'repository_path' => base_path(),
+    ]);
+
+    $run->initializeWorkflowState($task);
+    $run->markCheckpointCompleted(AiRun::CHECKPOINT_REPOSITORY_PREPARED);
+    $run->markCheckpointFailed(AiRun::CHECKPOINT_CHANGES_REVIEWED, 'Review failed.');
+
+    expect($run->nextIncompleteCheckpoint())->toBe(AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)
+        ->and($run->nextRunnableCheckpoint())->toBe(AiRun::CHECKPOINT_CHANGES_REVIEWED);
+});
+
+test('verified implementation marks unchecked acceptance criteria as checked', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Mark criteria verified');
+    $task->forceFill([
+        'acceptance_criteria' => [
+            ['body' => 'Implementation is present.', 'checked' => false],
+            ['body' => 'Existing behavior is already verified.', 'checked' => true],
+        ],
+    ])->save();
+    $run = createAutomationRun($task, $repositoryPath, 'task/mark-criteria-verified');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
+                    file_put_contents($repositoryPath.'/verified.txt', "Verified\n");
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: mark criteria verified']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->acceptance_criteria)->toBe([
+        ['body' => 'Implementation is present.', 'checked' => true],
+        ['body' => 'Existing behavior is already verified.', 'checked' => true],
+    ]);
+
+    $log = AiRunLog::query()
+        ->where('ai_run_id', $run->id)
+        ->where('message', 'Acceptance criteria verified')
+        ->sole();
+
+    expect($log->context)->toMatchArray([
+        'verified_count' => 2,
+        'newly_verified_count' => 1,
+    ]);
+});
+
 test('repository checkpoint retry checks out existing ai branch without resetting work', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
@@ -1195,6 +1365,48 @@ function bindSuccessfulRunMocks(User $expectedReviewer, ?User $expectedActor = n
             $mock->shouldReceive('getReviewState')
                 ->never()
                 ->andReturn(PullRequestReviewState::UNKNOWN);
+        })
+    );
+}
+
+function bindSuccessfulRunMocksWithoutReview(?User $expectedActor = null): void
+{
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: create pull request']));
+        })
+    );
+
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use ($expectedActor): void {
+            $mock->shouldReceive('createPullRequest')
+                ->once()
+                ->with(
+                    Mockery::type(Task::class),
+                    Mockery::type(AiRun::class),
+                    $expectedActor === null ? null : Mockery::on(fn (User $user): bool => $user->is($expectedActor)),
+                )
+                ->andReturn(new PullRequestResult(
+                    url: 'https://github.com/example/repo/pull/123',
+                    number: 123,
+                ));
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
         })
     );
 }

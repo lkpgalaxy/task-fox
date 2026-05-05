@@ -419,6 +419,50 @@ test('github pull request creation falls back to inherited gh auth without a tok
         ->and(trim((string) file_get_contents($envPath)))->toBe('unset');
 });
 
+test('github review request uses rest api instead of pr edit', function () {
+    $binPath = sys_get_temp_dir().'/task-fox-gh-review-bin-'.uniqid();
+    $argsPath = $binPath.'/args.txt';
+    $envPath = $binPath.'/env.txt';
+    $actor = User::factory()->create([
+        'github_username' => 'author-login',
+        'github_token' => 'ghp_author_token',
+    ]);
+    $reviewer = User::factory()->create(['github_username' => 'reviewer-login']);
+
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/gh',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '%s\n' \"\${GH_TOKEN-unset}\" > ".escapeshellarg($envPath)."\n"
+    );
+    chmod($binPath.'/gh', 0755);
+
+    $originalPath = getenv('PATH');
+    putenv('PATH='.$binPath.PATH_SEPARATOR.$originalPath);
+
+    try {
+        (new GithubPullRequestProvider)->requestReview(
+            'https://github.com/example/repo/pull/456',
+            $reviewer,
+            $actor,
+        );
+    } finally {
+        putenv('PATH='.$originalPath);
+    }
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($args)
+        ->toBe([
+            'api',
+            '--method',
+            'POST',
+            'repos/example/repo/pulls/456/requested_reviewers',
+            '-f',
+            'reviewers[]=reviewer-login',
+        ])
+        ->and(trim((string) file_get_contents($envPath)))->toBe('ghp_author_token');
+});
+
 test('codex agent prompt renders acceptance criteria from the task json column', function () {
     $task = Task::create([
         'title' => 'Implement feature',
@@ -470,10 +514,10 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
 
     expect($prompt)
         ->toContain('Acceptance-criteria-driven workflow:')
-        ->toContain('1. List criteria before implementation.')
-        ->toContain('2. Report verification proof for each criterion.')
+        ->toContain('1. [ ] List criteria before implementation.')
+        ->toContain('2. [ ] Report verification proof for each criterion.')
         ->toContain('extract and list every acceptance criterion')
-        ->toContain('verification checklist with one expected proof per item')
+        ->toContain('Treat [x] criteria as already verified and [ ] criteria as the remaining contract to satisfy')
         ->toContain('Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs')
         ->toContain('pause and ask for clarification before implementation')
         ->toContain('Pest feature/unit tests so each acceptance criterion has direct coverage')
@@ -481,7 +525,7 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('vendor/bin/pint --dirty --format agent')
         ->toContain('php artisan test --compact')
         ->toContain('Fix failing tests instead of ignoring them')
-        ->toContain('explicitly mark every acceptance criterion as satisfied')
+        ->toContain('explicitly mark every verified criterion as [x]')
         ->toContain('Final response must include the acceptance-criteria checklist, tests run, and whether they passed');
 });
 
@@ -532,6 +576,34 @@ test('codex agent refuses to implement tasks without acceptance criteria', funct
         ->successful->toBeFalse()
         ->error->toBe('Acceptance criteria are required before implementation.')
         ->and(file_exists($argsPath))->toBeFalse();
+});
+
+test('ai run request hash ignores acceptance criteria checked state', function () {
+    $task = Task::create([
+        'title' => 'Retry verified work',
+        'description' => 'Checked state can change during verification.',
+        'acceptance_criteria' => [
+            ['body' => 'The same criterion body remains.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+
+    $run = AiRun::create([
+        'task_id' => $task->id,
+        'status' => AiRun::STATUS_FAILED,
+        'branch_name' => 'task/retry-verified-work',
+        'repository_path' => base_path(),
+    ]);
+    $run->initializeWorkflowState($task);
+
+    $task->forceFill([
+        'acceptance_criteria' => [
+            ['body' => 'The same criterion body remains.', 'checked' => true],
+        ],
+    ])->save();
+
+    expect($run->refresh()->hasMatchingRequestHash($task->refresh()))->toBeTrue();
 });
 
 test('task index loads latest ai run without ambiguous columns', function () {

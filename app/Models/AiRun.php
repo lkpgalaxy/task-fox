@@ -166,7 +166,10 @@ class AiRun extends Model
 
     public function hasMatchingRequestHash(Task $task): bool
     {
-        return $this->requestHash() === self::requestHashForTask($task);
+        $requestHash = $this->requestHash();
+
+        return $requestHash === self::requestHashForTask($task)
+            || $requestHash === self::legacyRequestHashForTask($task);
     }
 
     public function requestHash(): ?string
@@ -177,6 +180,27 @@ class AiRun extends Model
     }
 
     public static function requestHashForTask(Task $task): string
+    {
+        $criteria = Collection::make($task->acceptance_criteria ?? [])
+            ->map(fn (array $criterion): array => [
+                'body' => (string) Arr::get($criterion, 'body', ''),
+            ])
+            ->values()
+            ->all();
+
+        return hash('sha256', json_encode([
+            'title' => (string) $task->title,
+            'description' => (string) $task->description,
+            'acceptance_criteria' => $criteria,
+            'priority' => (string) $task->priority,
+            'deadline' => $task->deadline?->toDateString(),
+            'assignee_user_id' => $task->assignee_user_id,
+            'source_input_id' => $task->source_input_id,
+            'project_id' => $task->project_id,
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private static function legacyRequestHashForTask(Task $task): string
     {
         $criteria = Collection::make($task->acceptance_criteria ?? [])
             ->map(fn (array $criterion): array => [
@@ -204,6 +228,32 @@ class AiRun extends Model
             $status = (string) Arr::get($checkpoint, 'status', self::CHECKPOINT_STATUS_PENDING);
 
             if (! in_array($status, [self::CHECKPOINT_STATUS_COMPLETED, self::CHECKPOINT_STATUS_SKIPPED], true)) {
+                return (string) $checkpoint['name'];
+            }
+        }
+
+        return null;
+    }
+
+    public function nextRunnableCheckpoint(): ?string
+    {
+        foreach ($this->workflowCheckpoints() as $checkpoint) {
+            $status = (string) Arr::get($checkpoint, 'status', self::CHECKPOINT_STATUS_PENDING);
+
+            if ($status === self::CHECKPOINT_STATUS_FAILED) {
+                return (string) $checkpoint['name'];
+            }
+        }
+
+        return $this->nextIncompleteCheckpoint();
+    }
+
+    public function runningCheckpoint(): ?string
+    {
+        foreach ($this->workflowCheckpoints() as $checkpoint) {
+            $status = (string) Arr::get($checkpoint, 'status', self::CHECKPOINT_STATUS_PENDING);
+
+            if ($status === self::CHECKPOINT_STATUS_RUNNING) {
                 return (string) $checkpoint['name'];
             }
         }

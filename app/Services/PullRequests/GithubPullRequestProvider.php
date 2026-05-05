@@ -55,13 +55,16 @@ class GithubPullRequestProvider implements PullRequestProvider
             return;
         }
 
+        $pullRequest = $this->parsePullRequestApiPath($pullRequestUrl);
+
         $result = $this->runProcess([
             'gh',
-            'pr',
-            'edit',
-            $pullRequestUrl,
-            '--add-reviewer',
-            $user->github_username,
+            'api',
+            '--method',
+            'POST',
+            $pullRequest.'/requested_reviewers',
+            '-f',
+            'reviewers[]='.$user->github_username,
         ], $this->resolveExecutionPath(), $this->githubTokenEnvironment($actor));
 
         if (! $result->isSuccessful()) {
@@ -146,6 +149,15 @@ BODY;
         }
 
         return (int) $matches[1];
+    }
+
+    private function parsePullRequestApiPath(string $url): string
+    {
+        if (! preg_match('~github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/?#]|$)~', $url, $matches)) {
+            throw new Exception('Invalid GitHub pull request URL.');
+        }
+
+        return "repos/{$matches[1]}/{$matches[2]}/pulls/{$matches[3]}";
     }
 
     private function assertNoPendingChanges(string $path): void

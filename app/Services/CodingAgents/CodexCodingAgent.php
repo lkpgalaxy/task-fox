@@ -119,7 +119,11 @@ class CodexCodingAgent implements CodingAgent
         $criteriaList = $criteria->isEmpty()
             ? '- No acceptance criteria were provided.'
             : $criteria
-                ->map(static fn (string $criterion, int $index): string => ($index + 1).". {$criterion}")
+                ->map(static function (array $criterion, int $index): string {
+                    $status = $criterion['checked'] ? '[x]' : '[ ]';
+
+                    return ($index + 1).". {$status} {$criterion['body']}";
+                })
                 ->join("\n");
 
         return <<<PROMPT
@@ -133,14 +137,14 @@ Acceptance criteria:
 
 Acceptance-criteria-driven workflow:
 1. Before implementation, extract and list every acceptance criterion from the task.
-2. Convert the criteria into a verification checklist with one expected proof per item.
+2. Treat [x] criteria as already verified and [ ] criteria as the remaining contract to satisfy.
 3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
 4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
 5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
 6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
 7. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
 8. Fix failing tests instead of ignoring them.
-9. Before finishing, explicitly mark every acceptance criterion as satisfied.
+9. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
 10. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
 PROMPT;
     }
@@ -171,13 +175,16 @@ PROMPT;
     }
 
     /**
-     * @return Collection<int, string>
+     * @return Collection<int, array{body: string, checked: bool}>
      */
     private function acceptanceCriteria(Task $task): Collection
     {
         return collect($task->acceptance_criteria ?? [])
-            ->map(static fn (array $criterion): string => trim((string) Arr::get($criterion, 'body', '')))
-            ->filter(static fn (string $criterion): bool => $criterion !== '')
+            ->map(static fn (array $criterion): array => [
+                'body' => trim((string) Arr::get($criterion, 'body', '')),
+                'checked' => (bool) Arr::get($criterion, 'checked', false),
+            ])
+            ->filter(static fn (array $criterion): bool => $criterion['body'] !== '')
             ->values();
     }
 

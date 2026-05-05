@@ -190,6 +190,35 @@ const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
 const projectRequiredMessage = 'Assign a project before approving this task.';
 
+const formatUser = (
+    user: Pick<User, 'name' | 'github_username'> | null | undefined,
+): string | null => {
+    if (!user) {
+        return null;
+    }
+
+    return user.github_username
+        ? `${user.name} (@${user.github_username})`
+        : user.name;
+};
+
+const formatReviewer = (
+    reviewer: Pick<User, 'name' | 'github_username'> | null | undefined,
+    defaultReviewer: Pick<User, 'name' | 'github_username'> | null | undefined,
+): string => {
+    const reviewerName = formatUser(reviewer);
+
+    if (reviewerName) {
+        return reviewerName;
+    }
+
+    const defaultReviewerName = formatUser(defaultReviewer);
+
+    return defaultReviewerName
+        ? `${defaultReviewerName} (project default)`
+        : 'No reviewer';
+};
+
 const formatError = (error: string | string[] | undefined): string | null => {
     if (Array.isArray(error)) {
         return error.join(', ');
@@ -935,7 +964,10 @@ function TaskDetails({
                     {task.assignee?.name ?? 'Unassigned'}
                 </DetailItem>
                 <DetailItem label="Reviewer">
-                    {task.reviewer?.name ?? 'No reviewer'}
+                    {formatReviewer(
+                        task.reviewer,
+                        task.project?.default_reviewer,
+                    )}
                 </DetailItem>
                 <DetailItem label="Approved by">
                     {task.approved_by_user?.name ?? 'Not approved'}
@@ -1239,11 +1271,7 @@ function TaskProjectModal({
                         {setStatus(project.has_credential_password)}
                     </ProjectDetailItem>
                     <ProjectDetailItem label="Default reviewer">
-                        {project.default_reviewer
-                            ? project.default_reviewer.github_username
-                                ? `${project.default_reviewer.name} (@${project.default_reviewer.github_username})`
-                                : project.default_reviewer.name
-                            : 'n/a'}
+                        {formatUser(project.default_reviewer) ?? 'n/a'}
                     </ProjectDetailItem>
                 </div>
             </div>

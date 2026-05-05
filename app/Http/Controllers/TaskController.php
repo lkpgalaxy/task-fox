@@ -375,6 +375,12 @@ class TaskController extends Controller
             'pull_request_number' => null,
         ]);
 
+        $run->update([
+            'status' => AiRun::STATUS_QUEUED,
+            'last_error' => null,
+            'finished_at' => null,
+        ]);
+
         if ($task->externalTaskLink) {
             $this->recordExternalMessage(
                 $task,
