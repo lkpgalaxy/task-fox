@@ -5,6 +5,7 @@ use App\DataTransferObjects\CodingAgentResult;
 use App\Jobs\AnalyzeInputSourceJob;
 use App\Models\InputSource;
 use App\Models\Project;
+use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRunLog;
 use App\Models\User;
@@ -28,6 +29,11 @@ test('it uses the agent analysis to create pending approval tasks', function () 
         'credential_username' => 'repo-user',
         'credential_password' => 'repo-secret',
         'base_branch' => 'develop',
+    ]);
+
+    SystemSetting::factory()->create([
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
     ]);
 
     $agent = new class($project->id) implements Agent
@@ -150,6 +156,8 @@ test('it uses the agent analysis to create pending approval tasks', function () 
             'input_source_title' => 'Input source notes',
             'analysis_status' => 'completed',
             'task_count' => 2,
+            'analyze_source_model' => 'gpt-5.4',
+            'analyze_source_reasoning_effort' => 'medium',
         ])
         ->and($completedLog->context)->not->toHaveKey('coding_agent');
 });

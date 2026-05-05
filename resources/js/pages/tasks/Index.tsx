@@ -79,6 +79,18 @@ type TaskRunRecord = {
     pull_request_number: number | null;
     attempt_count: number;
     review_attempt_count: number;
+    automation_models: {
+        analyze_source_model: string | null;
+        analyze_source_reasoning_effort: string | null;
+        plan_model: string | null;
+        plan_reasoning_effort: string | null;
+        implement_model: string | null;
+        implement_reasoning_effort: string | null;
+        review_model: string | null;
+        review_reasoning_effort: string | null;
+        commit_message_model: string | null;
+        commit_message_reasoning_effort: string | null;
+    };
     workflow_state: WorkflowState | null;
     last_error: string | null;
     started_at: string | null;
@@ -1171,6 +1183,58 @@ function TaskDetails({
                                             }
                                             formatDate={formatDisplayDateTime}
                                         />
+                                    </div>
+                                    <div className="mt-3">
+                                        <p className="text-xs font-medium text-ink-muted">
+                                            Automation models
+                                        </p>
+                                        <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                                            <DetailItem label="Analyze source">
+                                                {run.automation_models
+                                                    .analyze_source_model ??
+                                                    'Codex default'}
+                                                {' / '}
+                                                {run.automation_models
+                                                    .analyze_source_reasoning_effort ??
+                                                    'Codex default'}
+                                            </DetailItem>
+                                            <DetailItem label="Plan">
+                                                {run.automation_models
+                                                    .plan_model ??
+                                                    'Codex default'}
+                                                {' / '}
+                                                {run.automation_models
+                                                    .plan_reasoning_effort ??
+                                                    'Codex default'}
+                                            </DetailItem>
+                                            <DetailItem label="Implement">
+                                                {run.automation_models
+                                                    .implement_model ??
+                                                    'Codex default'}
+                                                {' / '}
+                                                {run.automation_models
+                                                    .implement_reasoning_effort ??
+                                                    'Codex default'}
+                                            </DetailItem>
+                                            <DetailItem label="Review">
+                                                {run.automation_models
+                                                    .review_model ??
+                                                    'Codex default'}
+                                                {' / '}
+                                                {run.automation_models
+                                                    .review_reasoning_effort ??
+                                                    'Codex default'}
+                                            </DetailItem>
+                                            <DetailItem label="Commit message">
+                                                {run.automation_models
+                                                    .commit_message_model ??
+                                                    'Codex default'}
+                                                {' / '}
+                                                {run.automation_models
+                                                    .commit_message_reasoning_effort ??
+                                                    'Codex default'}
+                                            </DetailItem>
+                                        </div>
                                     </div>
                                     <div className="mt-3 rounded-md border border-hairline bg-surface-1 p-3">
                                         <p className="text-xs font-medium text-ink-muted">

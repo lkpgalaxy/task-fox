@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Project;
+use App\Models\SystemSetting;
 use App\Models\User;
 // use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
@@ -32,5 +33,7 @@ class DatabaseSeeder extends Seeder
             'workspace_path' => sys_get_temp_dir().'/todo-test-'.Str::random(8),
             'base_branch' => 'staging',
         ]);
+
+        SystemSetting::query()->firstOrCreate([], []);
     }
 }

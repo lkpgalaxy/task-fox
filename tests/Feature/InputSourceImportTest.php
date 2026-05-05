@@ -2,6 +2,7 @@
 
 use App\Jobs\AnalyzeInputSourceJob;
 use App\Models\InputSource;
+use App\Models\SystemSetting;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -287,6 +288,43 @@ test('codex analysis prompt includes stored file path metadata for file backed s
         ->toContain('File size: 8 bytes')
         ->toContain(Storage::disk('local')->path('input-sources/roadmap.pdf'))
         ->toContain('analyze the PDF directly from disk');
+});
+
+test('codex analysis command uses the configured model', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-analysis-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-analysis-codex-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/codex',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '{\"tasks\":[]}'\n"
+    );
+    chmod($binPath.'/codex', 0755);
+
+    SystemSetting::factory()->create([
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+    ]);
+
+    $inputSource = new InputSource([
+        'title' => 'Roadmap note',
+        'analysis_status' => 'pending',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->analyzeInputSource($inputSource, []);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and($args)->toContain('exec')
+        ->and($args)->toContain('--model')
+        ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.4')
+        ->and($args)->toContain('-c')
+        ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="medium"');
 });
 
 function emptyPdf(): string

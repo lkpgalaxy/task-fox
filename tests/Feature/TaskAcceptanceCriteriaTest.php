@@ -2,6 +2,7 @@
 
 use App\Models\InputSource;
 use App\Models\Project;
+use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\User;
@@ -560,6 +561,10 @@ test('codex review command uses native review mode and parses a passing JSON res
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
+    SystemSetting::factory()->create([
+        'review_model' => 'gpt-5.5',
+        'review_reasoning_effort' => 'high',
+    ]);
     $run = TaskRun::create([
         'task_id' => $task->id,
         'status' => TaskRun::STATUS_REVIEWING_CHANGES,
@@ -577,6 +582,10 @@ test('codex review command uses native review mode and parses a passing JSON res
     expect($result->successful)->toBeTrue()
         ->and($result->payload['overall_correctness'])->toBe('patch is correct')
         ->and($args)->toContain('exec')
+        ->and($args)->toContain('--model')
+        ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.5')
+        ->and($args)->toContain('-c')
+        ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="high"')
         ->and($args)->toContain('-C')
         ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath)
         ->and($args)->toContain('review')
@@ -589,6 +598,51 @@ test('codex review command uses native review mode and parses a passing JSON res
         ->and($args[array_search('--output-last-message', $args, true) + 1])->toStartWith(sys_get_temp_dir())
         ->and(file_get_contents($argsPath))->toContain('"overall_correctness": "patch is correct"')
         ->and(file_get_contents($argsPath))->toContain('Return exactly one JSON object with this shape:');
+});
+
+test('codex review command omits the model flag when no review model is configured', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-no-model-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-no-model-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    createCodexReviewStub(
+        $binPath,
+        $argsPath,
+        '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks good.","overall_confidence_score":0.98}',
+    );
+
+    $task = Task::create([
+        'title' => 'Review command without model',
+        'description' => 'Review should use Codex defaults when no model is configured.',
+        'acceptance_criteria' => [
+            ['body' => 'Review mode is used.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    SystemSetting::factory()->create([
+        'review_model' => null,
+        'review_reasoning_effort' => null,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-no-model',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->reviewChanges($task, $run, 1);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and($args)->not->toContain('--model')
+        ->and($args)->not->toContain('-c');
 });
 
 test('codex review command surfaces findings as a failed review result', function () {
@@ -708,6 +762,54 @@ test('codex review fix prompt includes the review feedback and fix instructions'
         ->toContain('Make the smallest correct fix that resolves the review feedback.')
         ->toContain('Do not commit, push, or create a pull request.')
         ->toContain('leave a final checklist of the addressed findings in your response');
+});
+
+test('codex commit message command uses the configured model', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-commit-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-commit-codex-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/codex',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf 'feat: generated subject\n'\n"
+    );
+    chmod($binPath.'/codex', 0755);
+
+    $task = Task::create([
+        'title' => 'Generate commit subject',
+        'description' => 'Commit message generation should honor the configured model.',
+        'acceptance_criteria' => [
+            ['body' => 'Commit message generation uses Codex.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    SystemSetting::factory()->create([
+        'commit_message_model' => 'gpt-5.4-mini',
+        'commit_message_reasoning_effort' => 'medium',
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_GENERATING_COMMIT_MESSAGE,
+        'branch_name' => 'task/commit-message',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->generateCommitMessage($task, $run);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and($result->payload['message'])->toBe('feat: generated subject')
+        ->and($args)->toContain('--model')
+        ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.4-mini')
+        ->and($args)->toContain('-c')
+        ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="medium"');
 });
 
 test('codex agent prompt pauses when acceptance criteria are absent', function () {

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\SystemSettingsResolver;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -24,6 +25,16 @@ use Illuminate\Support\Collection;
     'last_error',
     'started_at',
     'finished_at',
+    'analyze_source_model',
+    'analyze_source_reasoning_effort',
+    'plan_model',
+    'plan_reasoning_effort',
+    'implement_model',
+    'implement_reasoning_effort',
+    'review_model',
+    'review_reasoning_effort',
+    'commit_message_model',
+    'commit_message_reasoning_effort',
 ])]
 class TaskRun extends Model
 {
@@ -114,6 +125,21 @@ class TaskRun extends Model
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        static::creating(function (TaskRun $run): void {
+            $snapshot = app(SystemSettingsResolver::class)->snapshot();
+
+            foreach ($snapshot as $column => $value) {
+                if ($run->getAttribute($column) !== null && $run->getAttribute($column) !== '') {
+                    continue;
+                }
+
+                $run->setAttribute($column, $value);
+            }
+        });
     }
 
     public function task(): BelongsTo

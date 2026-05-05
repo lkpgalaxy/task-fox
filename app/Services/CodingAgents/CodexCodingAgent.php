@@ -7,6 +7,7 @@ use App\DataTransferObjects\CodingAgentResult;
 use App\Models\InputSource;
 use App\Models\Task;
 use App\Models\TaskRun;
+use App\Services\SystemSettingsResolver;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
@@ -20,6 +21,7 @@ class CodexCodingAgent implements CodingAgent
      */
     public function __construct(
         private readonly array $context = [],
+        private ?SystemSettingsResolver $settingsResolver = null,
     ) {}
 
     public function run(Task $task, TaskRun $run): CodingAgentResult
@@ -34,7 +36,13 @@ class CodexCodingAgent implements CodingAgent
 
         $prompt = $this->buildTaskPrompt($task, $run);
 
-        $command = $this->buildCommand($task, $run, $prompt);
+        $command = $this->buildCommand(
+            $task,
+            $run,
+            $prompt,
+            $this->resolveRunSetting($run, 'implement_model'),
+            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+        );
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         $process = new Process($command, $repositoryPath);
@@ -77,7 +85,12 @@ class CodexCodingAgent implements CodingAgent
         $prompt = $this->buildPlanningPrompt($task, $run);
         $repositoryPath = $this->resolveWorkspacePath($run);
 
-        $process = new Process($this->buildPlanningCommand($run, $prompt), $repositoryPath);
+        $process = new Process($this->buildPlanningCommand(
+            $run,
+            $prompt,
+            $this->resolveRunSetting($run, 'plan_model'),
+            $this->resolveRunSetting($run, 'plan_reasoning_effort'),
+        ), $repositoryPath);
         $process->setTimeout(null);
         $process->setEnv(array_merge(
             $this->context,
@@ -135,7 +148,14 @@ class CodexCodingAgent implements CodingAgent
 
         try {
             $process = new Process(
-                $this->buildReviewCommand($task, $run, $attempt, $outputPath),
+                $this->buildReviewCommand(
+                    $task,
+                    $run,
+                    $attempt,
+                    $outputPath,
+                    $this->resolveRunSetting($run, 'review_model'),
+                    $this->resolveRunSetting($run, 'review_reasoning_effort'),
+                ),
                 $repositoryPath,
             );
             $process->setTimeout(null);
@@ -212,6 +232,8 @@ class CodexCodingAgent implements CodingAgent
             $run,
             $this->buildFixReviewPrompt($task, $run, $reviewFeedback, $attempt),
             'Coding agent review fix command completed.',
+            $this->resolveRunSetting($run, 'implement_model'),
+            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
         );
     }
 
@@ -222,6 +244,8 @@ class CodexCodingAgent implements CodingAgent
             $run,
             $this->buildCommitMessagePrompt($task),
             'Coding agent commit message command completed.',
+            $this->resolveRunSetting($run, 'commit_message_model'),
+            $this->resolveRunSetting($run, 'commit_message_reasoning_effort'),
         );
 
         if (! $result->successful) {
@@ -592,7 +616,7 @@ Rules:
 PROMPT;
 
         $repositoryPath = (string) base_path();
-        $process = new Process($this->buildAnalyzeCommand($repositoryPath, $prompt), $repositoryPath !== '' ? $repositoryPath : null);
+        $process = new Process($this->buildAnalyzeCommand($repositoryPath, $prompt, $this->resolveAnalyzeSourceModel(), $this->resolveAnalyzeSourceReasoningEffort()), $repositoryPath !== '' ? $repositoryPath : null);
         $process->setTimeout(null);
         $process->setEnv($this->context);
         $process->run();
@@ -683,13 +707,15 @@ No stored file metadata is available for this input source.
 PAYLOAD;
     }
 
-    private function buildCommand(Task $task, TaskRun $run, string $prompt): array
+    private function buildCommand(Task $task, TaskRun $run, string $prompt, ?string $model = null, ?string $reasoningEffort = null): array
     {
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         return [
             $this->codexExecutable(),
             'exec',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
             '--dangerously-bypass-approvals-and-sandbox',
             '-C',
             $repositoryPath,
@@ -697,13 +723,15 @@ PAYLOAD;
         ];
     }
 
-    private function buildPlanningCommand(TaskRun $run, string $prompt): array
+    private function buildPlanningCommand(TaskRun $run, string $prompt, ?string $model = null, ?string $reasoningEffort = null): array
     {
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         return [
             $this->codexExecutable(),
             'exec',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
             '--sandbox',
             'read-only',
             '--ephemeral',
@@ -713,9 +741,9 @@ PAYLOAD;
         ];
     }
 
-    private function executeTaskCommand(Task $task, TaskRun $run, string $prompt, string $successMessage): CodingAgentResult
+    private function executeTaskCommand(Task $task, TaskRun $run, string $prompt, string $successMessage, ?string $model = null, ?string $reasoningEffort = null): CodingAgentResult
     {
-        $command = $this->buildCommand($task, $run, $prompt);
+        $command = $this->buildCommand($task, $run, $prompt, $model, $reasoningEffort);
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         $process = new Process($command, $repositoryPath);
@@ -779,11 +807,13 @@ PAYLOAD;
         return trim($output);
     }
 
-    private function buildAnalyzeCommand(string $repositoryPath, string $prompt): array
+    private function buildAnalyzeCommand(string $repositoryPath, string $prompt, ?string $model = null, ?string $reasoningEffort = null): array
     {
         return [
             $this->codexExecutable(),
             'exec',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
             '--dangerously-bypass-approvals-and-sandbox',
             '-C',
             $repositoryPath,
@@ -791,13 +821,15 @@ PAYLOAD;
         ];
     }
 
-    private function buildReviewCommand(Task $task, TaskRun $run, int $attempt, string $outputPath): array
+    private function buildReviewCommand(Task $task, TaskRun $run, int $attempt, string $outputPath, ?string $model = null, ?string $reasoningEffort = null): array
     {
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         return [
             $this->codexExecutable(),
             'exec',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
             '-C',
             $repositoryPath,
             'review',
@@ -864,5 +896,61 @@ PAYLOAD;
         $path = tempnam(sys_get_temp_dir(), $prefix);
 
         return $path !== false ? $path : '';
+    }
+
+    private function settingsResolver(): SystemSettingsResolver
+    {
+        return $this->settingsResolver ??= app(SystemSettingsResolver::class);
+    }
+
+    private function resolveAnalyzeSourceModel(): ?string
+    {
+        return $this->settingsResolver()->analyzeSourceModel();
+    }
+
+    private function resolveAnalyzeSourceReasoningEffort(): ?string
+    {
+        return $this->settingsResolver()->analyzeSourceReasoningEffort();
+    }
+
+    private function resolveRunSetting(TaskRun $run, string $column): ?string
+    {
+        $value = $run->getAttribute($column);
+
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function modelArguments(?string $model): array
+    {
+        $model = trim((string) $model);
+
+        if ($model === '') {
+            return [];
+        }
+
+        return ['--model', $model];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function reasoningEffortArguments(?string $reasoningEffort): array
+    {
+        $reasoningEffort = trim((string) $reasoningEffort);
+
+        if ($reasoningEffort === '') {
+            return [];
+        }
+
+        return ['-c', 'model_reasoning_effort="'.$reasoningEffort.'"'];
     }
 }

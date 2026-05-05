@@ -8,6 +8,7 @@ use App\Models\Project;
 use App\Models\Task;
 use App\Models\TaskRunLog;
 use App\Models\User;
+use App\Services\SystemSettingsResolver;
 use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -25,7 +26,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
 
     public function __construct(public int $inputSourceId) {}
 
-    public function handle(TaskExtractor $extractor): void
+    public function handle(TaskExtractor $extractor, SystemSettingsResolver $settingsResolver): void
     {
         $inputSource = InputSource::find($this->inputSourceId);
 
@@ -33,12 +34,18 @@ class AnalyzeInputSourceJob implements ShouldQueue
             return;
         }
 
+        $analyzeSourceModel = $settingsResolver->analyzeSourceModel();
+        $analyzeSourceReasoningEffort = $settingsResolver->analyzeSourceReasoningEffort();
+
         $inputSource->update([
             'analysis_status' => 'processing',
             'analysis_result' => null,
             'last_analysis_error' => null,
         ]);
-        $this->log($inputSource, 'info', 'Input source analysis started');
+        $this->log($inputSource, 'info', 'Input source analysis started', [
+            'analyze_source_model' => $analyzeSourceModel,
+            'analyze_source_reasoning_effort' => $analyzeSourceReasoningEffort,
+        ]);
 
         try {
             $projects = Project::query()
@@ -113,6 +120,8 @@ class AnalyzeInputSourceJob implements ShouldQueue
             ]);
             $this->log($inputSource, 'info', 'Input source analysis completed', [
                 'task_count' => count($items),
+                'analyze_source_model' => $analyzeSourceModel,
+                'analyze_source_reasoning_effort' => $analyzeSourceReasoningEffort,
             ]);
         } catch (\Throwable $exception) {
             $inputSource->update([
@@ -121,6 +130,8 @@ class AnalyzeInputSourceJob implements ShouldQueue
             ]);
             $this->log($inputSource, 'error', 'Input source analysis failed', [
                 'error' => $exception->getMessage(),
+                'analyze_source_model' => $analyzeSourceModel,
+                'analyze_source_reasoning_effort' => $analyzeSourceReasoningEffort,
             ]);
         }
     }

@@ -9,6 +9,7 @@ use App\Enums\PullRequestReviewState;
 use App\Jobs\DispatchNextTaskRunJob;
 use App\Jobs\RunApprovedTaskWithCodingAgentJob;
 use App\Models\Project;
+use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
@@ -206,6 +207,18 @@ test('dispatch reuses the latest failed resumable task run and preserves logs', 
         'workspace_path' => '/tmp/task-fox-current',
         'base_branch' => 'develop',
     ]);
+    SystemSetting::factory()->create([
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+        'plan_model' => 'gpt-5.5',
+        'plan_reasoning_effort' => 'high',
+        'implement_model' => 'gpt-5.5',
+        'implement_reasoning_effort' => 'medium',
+        'review_model' => 'gpt-5.5',
+        'review_reasoning_effort' => 'high',
+        'commit_message_model' => 'gpt-5.4-mini',
+        'commit_message_reasoning_effort' => 'medium',
+    ]);
     $task = Task::create([
         'title' => 'Reuse failed run',
         'description' => 'Retry should not create a replacement run.',
@@ -234,6 +247,18 @@ test('dispatch reuses the latest failed resumable task run and preserves logs', 
         'base_branch' => 'main',
     ]);
     $run->initializeWorkflowState($task);
+    SystemSetting::query()->sole()->update([
+        'analyze_source_model' => 'gpt-4.1-mini',
+        'analyze_source_reasoning_effort' => 'low',
+        'plan_model' => 'gpt-4.1-mini',
+        'plan_reasoning_effort' => 'low',
+        'implement_model' => 'gpt-4.1-mini',
+        'implement_reasoning_effort' => 'low',
+        'review_model' => 'gpt-4.1-mini',
+        'review_reasoning_effort' => 'low',
+        'commit_message_model' => 'gpt-4.1-mini',
+        'commit_message_reasoning_effort' => 'low',
+    ]);
     TaskRunLog::create([
         'task_run_id' => $run->id,
         'level' => 'error',
@@ -247,6 +272,16 @@ test('dispatch reuses the latest failed resumable task run and preserves logs', 
         ->and($run->refresh()->status)->toBe(TaskRun::STATUS_QUEUED)
         ->and($run->workspace_path)->toBe('/tmp/task-fox-current')
         ->and($run->base_branch)->toBe('develop')
+        ->and($run->analyze_source_model)->toBe('gpt-5.4')
+        ->and($run->analyze_source_reasoning_effort)->toBe('medium')
+        ->and($run->plan_model)->toBe('gpt-5.5')
+        ->and($run->plan_reasoning_effort)->toBe('high')
+        ->and($run->implement_model)->toBe('gpt-5.5')
+        ->and($run->implement_reasoning_effort)->toBe('medium')
+        ->and($run->review_model)->toBe('gpt-5.5')
+        ->and($run->review_reasoning_effort)->toBe('high')
+        ->and($run->commit_message_model)->toBe('gpt-5.4-mini')
+        ->and($run->commit_message_reasoning_effort)->toBe('medium')
         ->and($run->logs()->where('message', 'Previous failure')->exists())->toBeTrue();
 
     Queue::assertPushed(
@@ -393,6 +428,18 @@ test('task run creation snapshots project workspace path and base branch', funct
         'url' => 'https://github.com/example/task-fox',
         'base_branch' => 'develop',
     ]);
+    SystemSetting::factory()->create([
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+        'plan_model' => 'gpt-5.5',
+        'plan_reasoning_effort' => 'high',
+        'implement_model' => 'gpt-5.5',
+        'implement_reasoning_effort' => 'medium',
+        'review_model' => 'gpt-5.5',
+        'review_reasoning_effort' => 'high',
+        'commit_message_model' => 'gpt-5.4-mini',
+        'commit_message_reasoning_effort' => 'medium',
+    ]);
     $task = Task::create([
         'title' => 'Run against project repository',
         'description' => 'task run should use project repository settings.',
@@ -410,7 +457,17 @@ test('task run creation snapshots project workspace path and base branch', funct
 
     expect($run)
         ->workspace_path->toBe('/tmp/task-fox')
-        ->base_branch->toBe('develop');
+        ->base_branch->toBe('develop')
+        ->analyze_source_model->toBe('gpt-5.4')
+        ->analyze_source_reasoning_effort->toBe('medium')
+        ->plan_model->toBe('gpt-5.5')
+        ->plan_reasoning_effort->toBe('high')
+        ->implement_model->toBe('gpt-5.5')
+        ->implement_reasoning_effort->toBe('medium')
+        ->review_model->toBe('gpt-5.5')
+        ->review_reasoning_effort->toBe('high')
+        ->commit_message_model->toBe('gpt-5.4-mini')
+        ->commit_message_reasoning_effort->toBe('medium');
 
     Queue::assertPushed(RunApprovedTaskWithCodingAgentJob::class);
 });
@@ -525,6 +582,67 @@ test('codex coding agent uses the run workspace as codex workspace and process c
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
+    SystemSetting::factory()->create([
+        'implement_model' => 'gpt-5.5',
+        'implement_reasoning_effort' => 'medium',
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'task/workspace',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'main',
+    ]);
+    SystemSetting::query()->sole()->update([
+        'implement_model' => 'gpt-4.1-mini',
+        'implement_reasoning_effort' => 'low',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->run($task, $run);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and(trim((string) file_get_contents($cwdPath)))->toBe($workspacePath)
+        ->and($args)->toContain('exec')
+        ->and($args)->toContain('--model')
+        ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.5')
+        ->and($args)->toContain('-c')
+        ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="medium"')
+        ->and($args)->toContain('--dangerously-bypass-approvals-and-sandbox')
+        ->and($args)->toContain('-C')
+        ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath);
+});
+
+test('codex coding agent omits the model flag when the implementation model is blank', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-codex-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+    $cwdPath = $workspacePath.'/cwd.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/codex',
+        "#!/bin/sh\npwd > ".escapeshellarg($cwdPath)."\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\n"
+    );
+    chmod($binPath.'/codex', 0755);
+
+    $task = Task::create([
+        'title' => 'Implement without model',
+        'description' => 'The coding agent should fall back to Codex defaults.',
+        'acceptance_criteria' => [
+            ['body' => 'Workspace is set for Codex.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    SystemSetting::factory()->create([
+        'implement_model' => null,
+        'implement_reasoning_effort' => null,
+    ]);
     $run = TaskRun::create([
         'task_id' => $task->id,
         'status' => TaskRun::STATUS_IMPLEMENTING,
@@ -541,10 +659,8 @@ test('codex coding agent uses the run workspace as codex workspace and process c
 
     expect($result->successful)->toBeTrue()
         ->and(trim((string) file_get_contents($cwdPath)))->toBe($workspacePath)
-        ->and($args)->toContain('exec')
-        ->and($args)->toContain('--dangerously-bypass-approvals-and-sandbox')
-        ->and($args)->toContain('-C')
-        ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath);
+        ->and($args)->not->toContain('--model')
+        ->and($args)->not->toContain('-c');
 });
 
 test('codex planning uses read only ephemeral sandbox and extracts proposed plan', function () {
@@ -569,6 +685,10 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
+    SystemSetting::factory()->create([
+        'plan_model' => 'gpt-5.5',
+        'plan_reasoning_effort' => 'high',
+    ]);
     $run = TaskRun::create([
         'task_id' => $task->id,
         'status' => TaskRun::STATUS_PLANNING,
@@ -586,6 +706,10 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
     expect($result->successful)->toBeTrue()
         ->and($result->payload['plan'])->toBe("## Plan\n\n- Inspect files.")
         ->and($args)->toContain('exec')
+        ->and($args)->toContain('--model')
+        ->and($args[array_search('--model', $args, true) + 1])->toBe('gpt-5.5')
+        ->and($args)->toContain('-c')
+        ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="high"')
         ->and($args)->toContain('--sandbox')
         ->and($args[array_search('--sandbox', $args, true) + 1])->toBe('read-only')
         ->and($args)->toContain('--ephemeral')
@@ -606,6 +730,9 @@ test('codex review prompt uses upstream review guidelines with task context', fu
         ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    SystemSetting::factory()->create([
+        'review_model' => 'gpt-5.5',
     ]);
     $run = TaskRun::create([
         'task_id' => $task->id,
