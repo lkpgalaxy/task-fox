@@ -53,6 +53,26 @@ class DispatchNextAiRunJob implements ShouldQueue
 
             $task->update(['status' => Task::STATUS_RUNNING]);
 
+            $resumableRun = $task->aiRuns()
+                ->where('status', AiRun::STATUS_FAILED)
+                ->latest('id')
+                ->get()
+                ->first(function (AiRun $run) use ($task): bool {
+                    return $run->requestHash() !== null && $run->hasMatchingRequestHash($task);
+                });
+
+            if ($resumableRun instanceof AiRun) {
+                $resumableRun->update([
+                    'status' => AiRun::STATUS_QUEUED,
+                    'last_error' => null,
+                    'finished_at' => null,
+                ]);
+
+                RunApprovedTaskWithCodingAgentJob::dispatch($resumableRun->id);
+
+                return;
+            }
+
             $workspacePath = (string) $task->project?->workspace_path;
             $baseBranch = trim((string) $task->project?->base_branch) !== ''
                 ? (string) $task->project?->base_branch
@@ -68,6 +88,7 @@ class DispatchNextAiRunJob implements ShouldQueue
                 'workspace_path' => $workspacePath,
                 'base_branch' => $baseBranch,
             ]);
+            $run->initializeWorkflowState($task);
 
             RunApprovedTaskWithCodingAgentJob::dispatch($run->id);
         } finally {

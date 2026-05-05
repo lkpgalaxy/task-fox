@@ -40,10 +40,16 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
         $task = $run->task;
         $repositoryPath = $this->resolveExecutionPath($run);
-        $branchName = $this->makeBranchName($task);
+        $branchName = $this->resolveBranchName($run, $task);
         $baseBranch = $this->resolveBaseBranch($run);
 
         try {
+            $run->initializeWorkflowState($task);
+
+            if (! $run->hasMatchingRequestHash($task)) {
+                throw new Exception('Task request changed since this AI run was created.');
+            }
+
             $run->update([
                 'status' => AiRun::STATUS_PREPARING,
                 'branch_name' => $branchName,
@@ -58,106 +64,34 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'run_id' => $run->id,
             ]);
 
-            $this->assertRepositoryReady($repositoryPath, $baseBranch);
-            $this->createBranch($repositoryPath, $branchName, $baseBranch);
-
-            $maxAttempts = max(1, (int) config('automation.agent.retry_limit', 2));
-            $passed = false;
-
-            for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
-                $run->increment('attempt_count');
-                $run->update(['status' => AiRun::STATUS_IMPLEMENTING]);
-
-                $this->log($run, 'info', 'Coding agent invocation started', [
-                    'attempt' => $attempt,
-                ]);
-
-                $agentResult = $codingAgent->run($task, $run);
-                $this->logAgentMessages($run, $agentResult);
-
-                if (! $agentResult->successful) {
-                    throw new Exception((string) $agentResult->error ?: 'Coding agent execution failed.');
-                }
-
-                if ($this->runTests($repositoryPath, $run)) {
-                    $passed = true;
-
-                    break;
-                }
-
-                if ($attempt >= $maxAttempts) {
-                    throw new Exception('Tests failed after retry limit reached.');
-                }
-
-                $this->log($run, 'warning', 'Tests failed; retrying', [
-                    'attempt' => $attempt,
-                    'max_attempts' => $maxAttempts,
-                ]);
-
-                if ($task->externalTaskLink) {
-                    $task->externalTaskLink->messages()->create([
-                        'type' => 'attempt',
-                        'payload' => ['run_id' => $run->id, 'attempt' => $attempt, 'outcome' => 'retrying'],
-                        'status' => 'failed',
-                        'error' => 'Tests failed, scheduling retry.',
-                        'sent_at' => now(),
-                    ]);
-
-                    $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed tests; retrying ({$attempt}/{$maxAttempts}).");
-                }
-
-                $run->update(['status' => AiRun::STATUS_PLANNING]);
+            if ($run->isCheckpointComplete(AiRun::CHECKPOINT_REPOSITORY_PREPARED)) {
+                $this->checkoutExistingBranch($repositoryPath, $branchName);
             }
 
-            if (! $passed) {
-                throw new Exception('Tests failed after retry limit reached.');
-            }
-
-            $this->reviewChanges($codingAgent, $task, $run);
-            $commitMessage = $this->generateCommitMessage($codingAgent, $task, $run);
-            $this->commitPendingChanges($repositoryPath, $commitMessage, $task->assignee);
-
-            $run->update(['status' => AiRun::STATUS_CREATING_PR]);
-            $pr = $pullRequestProvider->createPullRequest($task, $run, $task->assignee);
-
-            $task->update([
-                'status' => Task::STATUS_PR_CREATED,
-                'pull_request_url' => $pr->url,
-                'pull_request_number' => $pr->number,
-            ]);
-
-            $run->update([
-                'status' => AiRun::STATUS_WAITING_FOR_MERGE,
-                'pull_request_url' => $pr->url,
-                'pull_request_number' => $pr->number,
-            ]);
-
-            $reviewer = $this->resolvePullRequestReviewer($task);
-
-            if ($reviewer) {
-                $pullRequestProvider->requestReview($pr->url, $reviewer, $task->assignee);
-            }
-
-            if ($task->externalTaskLink) {
-                $task->externalTaskLink->messages()->create([
-                    'type' => 'pr_attached',
-                    'payload' => ['run_id' => $run->id, 'pull_request_url' => $pr->url],
-                    'status' => 'success',
-                    'error' => null,
-                    'sent_at' => now(),
-                ]);
-
-                $externalTaskProvider->attachPullRequest($task->externalTaskLink, $pr->url);
+            while ($checkpoint = $run->nextIncompleteCheckpoint()) {
+                match ($checkpoint) {
+                    AiRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
+                    AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
+                    AiRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run),
+                    AiRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath),
+                    AiRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
+                    AiRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
+                    AiRun::CHECKPOINT_EXTERNAL_TASK_UPDATED => $this->updateExternalTask($externalTaskProvider, $task, $run),
+                    default => throw new Exception("Unknown AI run checkpoint [{$checkpoint}]."),
+                };
             }
 
             $this->log($run, 'info', 'Pull request created and waiting for merge', [
-                'pull_request_url' => $pr->url,
+                'pull_request_url' => $run->pull_request_url,
             ]);
         } catch (Throwable $exception) {
+            $checkpoint = $run->nextIncompleteCheckpoint();
+            if ($checkpoint !== null) {
+                $run->markCheckpointFailed($checkpoint, $exception->getMessage());
+            }
+
             $task->update([
                 'status' => Task::STATUS_FAILED,
-                'approved_at' => null,
-                'approved_by_user_id' => null,
             ]);
 
             $run->update([
@@ -193,6 +127,86 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         return 'ai-task-'.(string) $task->id.'-'.Str::limit($slug, 40, '');
+    }
+
+    private function resolveBranchName(AiRun $run, Task $task): string
+    {
+        $branchName = trim((string) $run->branch_name);
+
+        if ($branchName === '' || $branchName === 'pending') {
+            return $this->makeBranchName($task);
+        }
+
+        return $branchName;
+    }
+
+    private function prepareRepository(AiRun $run, string $repositoryPath, string $branchName, string $baseBranch): void
+    {
+        $run->markCheckpointRunning(AiRun::CHECKPOINT_REPOSITORY_PREPARED);
+        $run->update(['status' => AiRun::STATUS_PREPARING]);
+
+        $this->assertRepositoryReady($repositoryPath, $baseBranch);
+        $this->createBranch($repositoryPath, $branchName, $baseBranch);
+
+        $run->markCheckpointCompleted(AiRun::CHECKPOINT_REPOSITORY_PREPARED);
+    }
+
+    private function verifyImplementation(
+        CodingAgent $codingAgent,
+        ExternalTaskProvider $externalTaskProvider,
+        Task $task,
+        AiRun $run,
+        string $repositoryPath,
+    ): void {
+        $maxAttempts = max(1, (int) config('automation.agent.retry_limit', 3));
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $run->markCheckpointRunning(AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+            $run->update([
+                'status' => AiRun::STATUS_IMPLEMENTING,
+                'attempt_count' => $run->checkpointAttempts(AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED),
+            ]);
+
+            $this->log($run, 'info', 'Coding agent invocation started', [
+                'attempt' => $attempt,
+            ]);
+
+            $agentResult = $codingAgent->run($task, $run);
+            $this->logAgentMessages($run, $agentResult);
+
+            if (! $agentResult->successful) {
+                throw new Exception((string) $agentResult->error ?: 'Coding agent execution failed.');
+            }
+
+            if ($this->runTests($repositoryPath, $run)) {
+                $run->markCheckpointCompleted(AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+
+                return;
+            }
+
+            if ($attempt >= $maxAttempts) {
+                throw new Exception('Tests failed after retry limit reached.');
+            }
+
+            $this->log($run, 'warning', 'Tests failed; retrying', [
+                'attempt' => $attempt,
+                'max_attempts' => $maxAttempts,
+            ]);
+
+            if ($task->externalTaskLink) {
+                $task->externalTaskLink->messages()->create([
+                    'type' => 'attempt',
+                    'payload' => ['run_id' => $run->id, 'attempt' => $attempt, 'outcome' => 'retrying'],
+                    'status' => 'failed',
+                    'error' => 'Tests failed, scheduling retry.',
+                    'sent_at' => now(),
+                ]);
+
+                $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed tests; retrying ({$attempt}/{$maxAttempts}).");
+            }
+
+            $run->update(['status' => AiRun::STATUS_PLANNING]);
+        }
     }
 
     private function resolvePullRequestReviewer(Task $task): ?User
@@ -257,6 +271,14 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
     }
 
+    private function checkoutExistingBranch(string $path, string $branchName): void
+    {
+        $result = $this->runProcess(['git', 'checkout', $branchName], $path);
+        if (! $result->isSuccessful()) {
+            throw new Exception('Unable to checkout existing AI branch: '.trim((string) $result->getErrorOutput()));
+        }
+    }
+
     private function runTests(string $path, AiRun $run): bool
     {
         $command = (string) config('automation.tests.command', 'php artisan test --compact');
@@ -274,11 +296,14 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function reviewChanges(CodingAgent $codingAgent, Task $task, AiRun $run): void
     {
-        $maxReviewAttempts = 3;
+        $maxReviewAttempts = max(1, (int) config('automation.agent.retry_limit', 3));
 
         for ($attempt = 1; $attempt <= $maxReviewAttempts; $attempt++) {
-            $run->increment('review_attempt_count');
-            $run->update(['status' => AiRun::STATUS_REVIEWING_CHANGES]);
+            $run->markCheckpointRunning(AiRun::CHECKPOINT_CHANGES_REVIEWED);
+            $run->update([
+                'status' => AiRun::STATUS_REVIEWING_CHANGES,
+                'review_attempt_count' => $run->checkpointAttempts(AiRun::CHECKPOINT_CHANGES_REVIEWED),
+            ]);
 
             $this->log($run, 'info', 'Coding agent review started', [
                 'attempt' => $attempt,
@@ -292,6 +317,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     'attempt' => $attempt,
                 ]);
 
+                $run->markCheckpointCompleted(AiRun::CHECKPOINT_CHANGES_REVIEWED);
+
                 return;
             }
 
@@ -302,9 +329,21 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             ]);
         }
 
-        $this->log($run, 'warning', 'Coding agent review failed after retry limit; continuing to commit message generation', [
+        $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
             'max_attempts' => $maxReviewAttempts,
         ]);
+
+        throw new Exception('Coding agent review failed after retry limit reached.');
+    }
+
+    private function commitChanges(CodingAgent $codingAgent, Task $task, AiRun $run, string $repositoryPath): void
+    {
+        $run->markCheckpointRunning(AiRun::CHECKPOINT_CHANGES_COMMITTED);
+
+        $commitMessage = $this->generateCommitMessage($codingAgent, $task, $run);
+        $this->commitPendingChanges($repositoryPath, $commitMessage, $task->assignee);
+
+        $run->markCheckpointCompleted(AiRun::CHECKPOINT_CHANGES_COMMITTED);
     }
 
     private function generateCommitMessage(CodingAgent $codingAgent, Task $task, AiRun $run): string
@@ -366,6 +405,83 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         if (! $commit->isSuccessful()) {
             throw new Exception('Unable to commit changes: '.trim((string) $commit->getErrorOutput()));
         }
+    }
+
+    private function createPullRequest(PullRequestProvider $pullRequestProvider, Task $task, AiRun $run): void
+    {
+        $run->markCheckpointRunning(AiRun::CHECKPOINT_PULL_REQUEST_CREATED);
+
+        if ($run->pull_request_url || $task->pull_request_url) {
+            $run->update([
+                'status' => AiRun::STATUS_WAITING_FOR_MERGE,
+                'pull_request_url' => $run->pull_request_url ?? $task->pull_request_url,
+                'pull_request_number' => $run->pull_request_number ?? $task->pull_request_number,
+            ]);
+
+            $task->update([
+                'status' => Task::STATUS_PR_CREATED,
+                'pull_request_url' => $run->pull_request_url,
+                'pull_request_number' => $run->pull_request_number,
+            ]);
+
+            $run->markCheckpointSkipped(AiRun::CHECKPOINT_PULL_REQUEST_CREATED);
+
+            return;
+        }
+
+        $run->update(['status' => AiRun::STATUS_CREATING_PR]);
+        $pr = $pullRequestProvider->createPullRequest($task, $run, $task->assignee);
+
+        $task->update([
+            'status' => Task::STATUS_PR_CREATED,
+            'pull_request_url' => $pr->url,
+            'pull_request_number' => $pr->number,
+        ]);
+
+        $run->update([
+            'status' => AiRun::STATUS_WAITING_FOR_MERGE,
+            'pull_request_url' => $pr->url,
+            'pull_request_number' => $pr->number,
+        ]);
+
+        $run->markCheckpointCompleted(AiRun::CHECKPOINT_PULL_REQUEST_CREATED);
+    }
+
+    private function requestReview(PullRequestProvider $pullRequestProvider, Task $task, AiRun $run): void
+    {
+        $run->markCheckpointRunning(AiRun::CHECKPOINT_REVIEW_REQUESTED);
+
+        $reviewer = $this->resolvePullRequestReviewer($task);
+        if (! $reviewer || ! $run->pull_request_url) {
+            $run->markCheckpointSkipped(AiRun::CHECKPOINT_REVIEW_REQUESTED);
+
+            return;
+        }
+
+        $pullRequestProvider->requestReview($run->pull_request_url, $reviewer, $task->assignee);
+        $run->markCheckpointCompleted(AiRun::CHECKPOINT_REVIEW_REQUESTED);
+    }
+
+    private function updateExternalTask(ExternalTaskProvider $externalTaskProvider, Task $task, AiRun $run): void
+    {
+        $run->markCheckpointRunning(AiRun::CHECKPOINT_EXTERNAL_TASK_UPDATED);
+
+        if (! $task->externalTaskLink || ! $run->pull_request_url) {
+            $run->markCheckpointSkipped(AiRun::CHECKPOINT_EXTERNAL_TASK_UPDATED);
+
+            return;
+        }
+
+        $task->externalTaskLink->messages()->create([
+            'type' => 'pr_attached',
+            'payload' => ['run_id' => $run->id, 'pull_request_url' => $run->pull_request_url],
+            'status' => 'success',
+            'error' => null,
+            'sent_at' => now(),
+        ]);
+
+        $externalTaskProvider->attachPullRequest($task->externalTaskLink, $run->pull_request_url);
+        $run->markCheckpointCompleted(AiRun::CHECKPOINT_EXTERNAL_TASK_UPDATED);
     }
 
     /**

@@ -48,6 +48,7 @@ class TaskController extends Controller
                     'ai_runs.pull_request_url',
                     'ai_runs.pull_request_number',
                     'ai_runs.review_attempt_count',
+                    'ai_runs.workflow_state',
                 ]),
                 'externalTaskLink:id,task_id,external_task_provider,external_task_id,external_url',
             ])
@@ -64,7 +65,7 @@ class TaskController extends Controller
                     'approvedByUser:id,name,github_username',
                     'sourceInput:id,title,analysis_status',
                     'project:id,name,workspace_path,url,default_reviewer_user_id',
-                    'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,last_error,started_at,finished_at,updated_at',
+                    'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,updated_at',
                     'aiRuns.logs:id,ai_run_id,level,message,context,created_at',
                     'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
                 ])
@@ -154,8 +155,9 @@ class TaskController extends Controller
 
         $criteria = $request->acceptanceCriteria();
 
-        $shouldResetApproval = $task->status === Task::STATUS_APPROVED
-            && ($this->isApprovedFieldChanged($task, $data, $criteria));
+        $approvalFieldsChanged = $this->isApprovedFieldChanged($task, $data, $criteria);
+        $shouldResetApproval = in_array($task->status, [Task::STATUS_APPROVED, Task::STATUS_FAILED], true)
+            && $approvalFieldsChanged;
 
         $task->fill(
             Arr::only($data, [
@@ -326,6 +328,8 @@ class TaskController extends Controller
 
     public function retry(Task $task): RedirectResponse
     {
+        $task->loadMissing('aiRuns');
+
         if ($task->status !== Task::STATUS_FAILED) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
@@ -344,6 +348,20 @@ class TaskController extends Controller
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
                 ->withErrors(['actor' => 'No actor available to record retry approval.']);
+        }
+
+        $run = $task->aiRuns()
+            ->where('status', AiRun::STATUS_FAILED)
+            ->latest('id')
+            ->get()
+            ->first(function (AiRun $candidate) use ($task): bool {
+                return $candidate->requestHash() !== null && $candidate->hasMatchingRequestHash($task);
+            });
+
+        if (! $run instanceof AiRun) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['retry' => 'This failed task has changed since its last resumable run. Submit it for approval to start a new run.']);
         }
 
         $task->update([
@@ -558,7 +576,7 @@ class TaskController extends Controller
             'acceptance_criteria' => $this->normalizeCriteria($task->acceptance_criteria ?? []),
             'created_at' => $task->created_at?->toIso8601String(),
             'updated_at' => $task->updated_at?->toIso8601String(),
-            'latest_ai_run' => optional($task->latestAiRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number']),
+            'latest_ai_run' => optional($task->latestAiRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number', 'workflow_state']),
             'external_task_link' => optional($task->externalTaskLink)?->only([
                 'id',
                 'external_task_provider',
@@ -582,6 +600,7 @@ class TaskController extends Controller
                 'pull_request_number' => $run->pull_request_number,
                 'attempt_count' => $run->attempt_count,
                 'review_attempt_count' => $run->review_attempt_count,
+                'workflow_state' => $run->workflow_state,
                 'last_error' => $run->last_error,
                 'started_at' => $run->started_at?->toIso8601String(),
                 'finished_at' => $run->finished_at?->toIso8601String(),

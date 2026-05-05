@@ -56,6 +56,20 @@ type RunLog = {
     created_at: string | null;
 };
 
+type WorkflowCheckpoint = {
+    name: string;
+    status: string;
+    attempts: number;
+    completed_at: string | null;
+    failed_at: string | null;
+    error: string | null;
+};
+
+type WorkflowState = {
+    request_hash?: string;
+    checkpoints?: WorkflowCheckpoint[];
+};
+
 type AiRunRecord = {
     id: number;
     status: string;
@@ -65,6 +79,8 @@ type AiRunRecord = {
     pull_request_url: string | null;
     pull_request_number: number | null;
     attempt_count: number;
+    review_attempt_count: number;
+    workflow_state: WorkflowState | null;
     last_error: string | null;
     started_at: string | null;
     finished_at: string | null;
@@ -107,6 +123,7 @@ type TaskRecord = {
         branch_name: string | null;
         pull_request_url: string | null;
         pull_request_number: number | null;
+        workflow_state: WorkflowState | null;
     } | null;
     external_task_link?: {
         id: number;
@@ -158,6 +175,12 @@ type TaskFormData = {
 const emptyCriterion = (): Criterion => ({ body: '', checked: false });
 
 const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
+
+const checkpointLabel = (name: string) =>
+    name
+        .split('_')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
 
 const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
@@ -990,7 +1013,45 @@ function TaskDetails({
                                         Branch: {run.branch_name ?? 'None'}
                                     </span>
                                     <span>Attempts: {run.attempt_count}</span>
+                                    <span>
+                                        Reviews: {run.review_attempt_count}
+                                    </span>
                                 </div>
+                                {run.workflow_state?.checkpoints?.length ? (
+                                    <div className="mt-3 grid gap-2">
+                                        {run.workflow_state.checkpoints.map(
+                                            (checkpoint) => (
+                                                <div
+                                                    key={`${run.id}-${checkpoint.name}`}
+                                                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-hairline bg-surface-1 px-2 py-1.5 text-xs"
+                                                >
+                                                    <span className="text-ink-muted">
+                                                        {checkpointLabel(
+                                                            checkpoint.name,
+                                                        )}
+                                                    </span>
+                                                    <span className="flex items-center gap-2">
+                                                        <Badge
+                                                            value={
+                                                                checkpoint.status
+                                                            }
+                                                        >
+                                                            {
+                                                                checkpoint.status
+                                                            }
+                                                        </Badge>
+                                                        <span className="text-ink-subtle">
+                                                            {
+                                                                checkpoint.attempts
+                                                            }{' '}
+                                                            attempts
+                                                        </span>
+                                                    </span>
+                                                </div>
+                                            ),
+                                        )}
+                                    </div>
+                                ) : null}
                                 {run.pull_request_url ? (
                                     <p className="mt-2 truncate text-xs text-ink-subtle">
                                         PR:{' '}

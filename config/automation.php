@@ -9,7 +9,7 @@ return [
 
     'agent' => [
         'driver' => env('AGENT', env('CODING_AGENT', 'codex')),
-        'retry_limit' => (int) env('AGENT_RETRY_LIMIT', 2),
+        'retry_limit' => (int) env('AGENT_RETRY_LIMIT', 3),
     ],
 
     'tests' => [
