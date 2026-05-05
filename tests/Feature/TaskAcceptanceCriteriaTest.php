@@ -293,6 +293,17 @@ test('github pull request creation parses gh create url output', function () {
     ], $workspacePath);
     runTaskAcceptanceProcess(['git', 'checkout', '-b', 'task/create-pr'], $workspacePath);
     file_put_contents($workspacePath.'/feature.txt', "Generated change\n");
+    runTaskAcceptanceProcess(['git', 'add', 'feature.txt'], $workspacePath);
+    runTaskAcceptanceProcess([
+        'git',
+        '-c',
+        'user.email=bootstrap@example.com',
+        '-c',
+        'user.name=Bootstrap Author',
+        'commit',
+        '-m',
+        'Prepared change',
+    ], $workspacePath);
 
     file_put_contents(
         $binPath.'/gh',
@@ -338,8 +349,8 @@ test('github pull request creation parses gh create url output', function () {
         ->url->toBe('https://github.com/example/repo/pull/456')
         ->number->toBe(456)
         ->and($ghToken)->toBe('ghp_author_token')
-        ->and($commit)->toBe('feat: complete task '.$task->id.' create-pr')
-        ->and($commitAuthor)->toBe('commit-author <commit-author@example.com>')
+        ->and($commit)->toBe('Prepared change')
+        ->and($commitAuthor)->toBe('Bootstrap Author <bootstrap@example.com>')
         ->and($args)->toContain('pr')
         ->and($args)->toContain('create')
         ->and($args)->not->toContain('--json');

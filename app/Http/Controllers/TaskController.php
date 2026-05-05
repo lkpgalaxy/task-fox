@@ -47,6 +47,7 @@ class TaskController extends Controller
                     'ai_runs.branch_name',
                     'ai_runs.pull_request_url',
                     'ai_runs.pull_request_number',
+                    'ai_runs.review_attempt_count',
                 ]),
                 'externalTaskLink:id,task_id,external_task_provider,external_task_id,external_url',
             ])
@@ -63,7 +64,7 @@ class TaskController extends Controller
                     'approvedByUser:id,name,github_username',
                     'sourceInput:id,title,analysis_status',
                     'project:id,name,workspace_path,url,default_reviewer_user_id',
-                    'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,last_error,started_at,finished_at,updated_at',
+                    'aiRuns:id,task_id,status,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,last_error,started_at,finished_at,updated_at',
                     'aiRuns.logs:id,ai_run_id,level,message,context,created_at',
                     'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
                 ])
@@ -580,6 +581,7 @@ class TaskController extends Controller
                 'pull_request_url' => $run->pull_request_url,
                 'pull_request_number' => $run->pull_request_number,
                 'attempt_count' => $run->attempt_count,
+                'review_attempt_count' => $run->review_attempt_count,
                 'last_error' => $run->last_error,
                 'started_at' => $run->started_at?->toIso8601String(),
                 'finished_at' => $run->finished_at?->toIso8601String(),

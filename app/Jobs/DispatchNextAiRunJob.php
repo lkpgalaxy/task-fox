@@ -61,6 +61,7 @@ class DispatchNextAiRunJob implements ShouldQueue
             $run = $task->aiRuns()->create([
                 'status' => AiRun::STATUS_QUEUED,
                 'attempt_count' => 0,
+                'review_attempt_count' => 0,
                 'branch_name' => 'pending',
                 'project_id' => $task->project_id,
                 'repository_path' => $workspacePath,

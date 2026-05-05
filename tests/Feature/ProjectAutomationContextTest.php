@@ -395,6 +395,190 @@ test('pull request review uses task reviewer before project default reviewer', f
     expect($task->refresh()->status)->toBe(Task::STATUS_PR_CREATED);
 });
 
+test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempts separately', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Separate attempts');
+    $run = createAutomationRun($task, $repositoryPath, 'task/separate-attempts');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->with(Mockery::type(Task::class), Mockery::type(AiRun::class), 1)
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: separate attempts']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->attempt_count->toBe(1)
+        ->review_attempt_count->toBe(1)
+        ->status->toBe(AiRun::STATUS_WAITING_FOR_MERGE);
+});
+
+test('RunApprovedTaskWithCodingAgentJob reviews after tests pass and before pull request creation', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $events = [];
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Review before PR');
+    $run = createAutomationRun($task, $repositoryPath, 'task/review-before-pr');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use (&$events, $repositoryPath): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturnUsing(function () use (&$events, $repositoryPath): CodingAgentResult {
+                    $events[] = 'implementation';
+                    file_put_contents($repositoryPath.'/feature.txt', "Implemented\n");
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'review';
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'commit-message';
+
+                    return new CodingAgentResult(successful: true, payload: ['message' => 'feat: add reviewed change']);
+                });
+        })
+    );
+    bindSuccessfulAuxiliaryMocks($events, $repositoryPath, 'feat: add reviewed change');
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($events)->toBe(['implementation', 'review', 'commit-message', 'pull-request']);
+});
+
+test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Review retry success');
+    $run = createAutomationRun($task, $repositoryPath, 'task/review-retry-success');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->twice()
+                ->andReturn(
+                    new CodingAgentResult(successful: false, error: 'Needs fixes.'),
+                    new CodingAgentResult(successful: true),
+                );
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: review retry']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->review_attempt_count->toBe(2)
+        ->status->toBe(AiRun::STATUS_WAITING_FOR_MERGE);
+});
+
+test('RunApprovedTaskWithCodingAgentJob continues to commit message generation after three failed reviews', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Review failures continue');
+    $run = createAutomationRun($task, $repositoryPath, 'task/review-failures-continue');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->times(3)
+                ->andReturn(new CodingAgentResult(successful: false, error: 'Review failed.'));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: continue after review failures']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->review_attempt_count->toBe(3)
+        ->status->toBe(AiRun::STATUS_WAITING_FOR_MERGE)
+        ->and($run->logs()->where('message', 'Coding agent review failed after retry limit; continuing to commit message generation')->exists())
+        ->toBeTrue();
+});
+
+test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git commit', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $assignee = User::factory()->create([
+        'email' => 'agent@example.com',
+        'github_username' => 'agent-login',
+    ]);
+    $task = createApprovedAutomationTask($repositoryPath, 'Generated commit message', $assignee);
+    $run = createAutomationRun($task, $repositoryPath, 'task/generated-commit-message');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
+                    file_put_contents($repositoryPath.'/generated.txt', "Generated\n");
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'feat: use generated subject']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    $commit = trim(runSuccessfulProcessWithOutput(['git', 'log', '-1', '--pretty=%s'], $repositoryPath));
+    $author = trim(runSuccessfulProcessWithOutput(['git', 'log', '-1', '--pretty=%an <%ae>'], $repositoryPath));
+
+    expect($commit)->toBe('feat: use generated subject')
+        ->and($author)->toBe('agent-login <agent@example.com>');
+});
+
 test('failed task can create a pull request from the latest ai run branch', function () {
     $actor = User::factory()->create([
         'email' => 'author@example.com',
@@ -601,6 +785,12 @@ function bindSuccessfulRunMocks(User $expectedReviewer, ?User $expectedActor = n
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: create pull request']));
         })
     );
 
@@ -637,6 +827,69 @@ function bindSuccessfulRunMocks(User $expectedReviewer, ?User $expectedActor = n
     );
 }
 
+function bindSuccessfulAuxiliaryMocks(?array &$events = null, ?string $repositoryPath = null, ?string $expectedCommit = null): void
+{
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock) use (&$events, $repositoryPath, $expectedCommit): void {
+            $mock->shouldReceive('createPullRequest')
+                ->once()
+                ->andReturnUsing(function () use (&$events, $repositoryPath, $expectedCommit): PullRequestResult {
+                    $events[] = 'pull-request';
+
+                    if ($repositoryPath !== null && $expectedCommit !== null) {
+                        expect(trim(runSuccessfulProcessWithOutput(['git', 'log', '-1', '--pretty=%s'], $repositoryPath)))->toBe($expectedCommit);
+                    }
+
+                    return new PullRequestResult(
+                        url: 'https://github.com/example/repo/pull/123',
+                        number: 123,
+                    );
+                });
+            $mock->shouldReceive('requestReview')->zeroOrMoreTimes();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+}
+
+function createApprovedAutomationTask(string $repositoryPath, string $title, ?User $assignee = null): Task
+{
+    $project = Project::create([
+        'name' => $title,
+        'workspace_path' => $repositoryPath,
+    ]);
+
+    return Task::create([
+        'title' => $title,
+        'description' => 'Run the approved automation flow.',
+        'acceptance_criteria' => [
+            ['body' => 'Automation completes.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'assignee_user_id' => $assignee?->id,
+        'project_id' => $project->id,
+    ]);
+}
+
+function createAutomationRun(Task $task, string $repositoryPath, string $branchName): AiRun
+{
+    return AiRun::create([
+        'task_id' => $task->id,
+        'project_id' => $task->project_id,
+        'status' => AiRun::STATUS_QUEUED,
+        'branch_name' => $branchName,
+        'repository_path' => $repositoryPath,
+        'workspace_path' => $repositoryPath,
+        'base_branch' => 'main',
+    ]);
+}
+
 function createCleanGitRepository(): string
 {
     $repositoryPath = sys_get_temp_dir().'/task-fox-review-repo-'.uniqid();
@@ -660,4 +913,16 @@ function runSuccessfulProcess(array $command, string $cwd): void
     if (! $process->isSuccessful()) {
         throw new RuntimeException($process->getErrorOutput());
     }
+}
+
+function runSuccessfulProcessWithOutput(array $command, string $cwd): string
+{
+    $process = new Process($command, $cwd);
+    $process->run();
+
+    if (! $process->isSuccessful()) {
+        throw new RuntimeException($process->getErrorOutput());
+    }
+
+    return (string) $process->getOutput();
 }

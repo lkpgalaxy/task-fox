@@ -72,6 +72,46 @@ class CodexCodingAgent implements CodingAgent
         );
     }
 
+    public function reviewChanges(Task $task, AiRun $run, int $attempt): CodingAgentResult
+    {
+        return $this->executeTaskCommand(
+            $task,
+            $run,
+            $this->buildReviewPrompt($task, $run, $attempt),
+            'Coding agent review command completed.',
+        );
+    }
+
+    public function generateCommitMessage(Task $task, AiRun $run): CodingAgentResult
+    {
+        $result = $this->executeTaskCommand(
+            $task,
+            $run,
+            $this->buildCommitMessagePrompt($task),
+            'Coding agent commit message command completed.',
+        );
+
+        if (! $result->successful) {
+            return $result;
+        }
+
+        $subject = $this->extractCommitSubject($result->messages);
+
+        if ($subject === '') {
+            return new CodingAgentResult(
+                successful: false,
+                messages: $result->messages,
+                error: 'Coding agent did not return a commit message.',
+            );
+        }
+
+        return new CodingAgentResult(
+            successful: true,
+            messages: $result->messages,
+            payload: ['message' => $subject],
+        );
+    }
+
     private function buildTaskPrompt(Task $task): string
     {
         $criteria = $this->acceptanceCriteria($task);
@@ -102,6 +142,31 @@ Acceptance-criteria-driven workflow:
 8. Fix failing tests instead of ignoring them.
 9. Before finishing, explicitly mark every acceptance criterion as satisfied.
 10. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+PROMPT;
+    }
+
+    private function buildReviewPrompt(Task $task, AiRun $run, int $attempt): string
+    {
+        $baseBranch = $run->base_branch ?: 'main';
+
+        return <<<PROMPT
+Review changes for task {$task->id}: {$task->title}
+
+Base branch: {$baseBranch}
+Review attempt: {$attempt}
+
+Inspect all changes against the base branch. Verify the implementation is scoped to the task description and acceptance criteria, check for regressions or missing tests, fix any issues you find, and rerun relevant checks after fixes.
+
+Report whether review passed. Exit successfully only when the reviewed changes are ready to commit.
+PROMPT;
+    }
+
+    private function buildCommitMessagePrompt(Task $task): string
+    {
+        return <<<PROMPT
+Inspect the final staged and unstaged diff for task {$task->id}: {$task->title}
+
+Return exactly one Conventional Commit subject line that matches this repository's recent commit history. Do not include markdown, explanation, quotes, or a body.
 PROMPT;
     }
 
@@ -266,6 +331,63 @@ PAYLOAD;
             $repositoryPath,
             $prompt,
         ];
+    }
+
+    private function executeTaskCommand(Task $task, AiRun $run, string $prompt, string $successMessage): CodingAgentResult
+    {
+        $command = $this->buildCommand($task, $run, $prompt);
+        $repositoryPath = $this->resolveWorkspacePath($run);
+
+        $process = new Process($command, $repositoryPath);
+        $process->setTimeout(null);
+        $process->setEnv(array_merge(
+            $this->context,
+            [
+                'TASK_ID' => (string) $task->id,
+                'TASK_RUN_ID' => (string) $run->id,
+                'TASK_WORKSPACE_PATH' => $repositoryPath,
+            ],
+        ));
+        $process->run();
+
+        $output = trim((string) $process->getOutput());
+        $errorOutput = trim((string) $process->getErrorOutput());
+
+        if (! $process->isSuccessful()) {
+            $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
+
+            return new CodingAgentResult(successful: false, messages: [], error: $message);
+        }
+
+        return new CodingAgentResult(
+            successful: true,
+            messages: array_values(
+                array_filter([
+                    $successMessage,
+                    $output !== '' ? "Output: {$output}" : null,
+                    $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
+                ], static fn (?string $message) => $message !== null),
+            ),
+        );
+    }
+
+    /**
+     * @param  list<string>  $messages
+     */
+    private function extractCommitSubject(array $messages): string
+    {
+        foreach ($messages as $message) {
+            if (! str_starts_with($message, 'Output: ')) {
+                continue;
+            }
+
+            $lines = preg_split('/\R/', substr($message, 8)) ?: [];
+            $subject = trim((string) ($lines[0] ?? ''));
+
+            return trim($subject, "\"'` \t\n\r\0\x0B");
+        }
+
+        return '';
     }
 
     private function buildAnalyzeCommand(string $repositoryPath, string $prompt): array

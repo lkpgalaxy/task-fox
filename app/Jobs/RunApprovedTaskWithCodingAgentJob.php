@@ -113,6 +113,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 throw new Exception('Tests failed after retry limit reached.');
             }
 
+            $this->reviewChanges($codingAgent, $task, $run);
+            $commitMessage = $this->generateCommitMessage($codingAgent, $task, $run);
+            $this->commitPendingChanges($repositoryPath, $commitMessage, $task->assignee);
+
             $run->update(['status' => AiRun::STATUS_CREATING_PR]);
             $pr = $pullRequestProvider->createPullRequest($task, $run, $task->assignee);
 
@@ -268,6 +272,119 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return $process->isSuccessful();
     }
 
+    private function reviewChanges(CodingAgent $codingAgent, Task $task, AiRun $run): void
+    {
+        $maxReviewAttempts = 3;
+
+        for ($attempt = 1; $attempt <= $maxReviewAttempts; $attempt++) {
+            $run->increment('review_attempt_count');
+            $run->update(['status' => AiRun::STATUS_REVIEWING_CHANGES]);
+
+            $this->log($run, 'info', 'Coding agent review started', [
+                'attempt' => $attempt,
+            ]);
+
+            $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
+            $this->logAgentMessages($run, $agentResult);
+
+            if ($agentResult->successful) {
+                $this->log($run, 'info', 'Coding agent review passed', [
+                    'attempt' => $attempt,
+                ]);
+
+                return;
+            }
+
+            $this->log($run, 'warning', 'Coding agent review failed', [
+                'attempt' => $attempt,
+                'max_attempts' => $maxReviewAttempts,
+                'error' => $agentResult->error,
+            ]);
+        }
+
+        $this->log($run, 'warning', 'Coding agent review failed after retry limit; continuing to commit message generation', [
+            'max_attempts' => $maxReviewAttempts,
+        ]);
+    }
+
+    private function generateCommitMessage(CodingAgent $codingAgent, Task $task, AiRun $run): string
+    {
+        $run->update(['status' => AiRun::STATUS_GENERATING_COMMIT_MESSAGE]);
+
+        $this->log($run, 'info', 'Coding agent commit message generation started');
+
+        $agentResult = $codingAgent->generateCommitMessage($task, $run);
+        $this->logAgentMessages($run, $agentResult);
+
+        if (! $agentResult->successful) {
+            throw new Exception((string) $agentResult->error ?: 'Coding agent commit message generation failed.');
+        }
+
+        $message = trim((string) ($agentResult->payload['message'] ?? ''));
+
+        if ($message === '') {
+            throw new Exception('Coding agent did not return a commit message.');
+        }
+
+        return $message;
+    }
+
+    private function commitPendingChanges(string $path, string $message, ?User $author): void
+    {
+        $runStatus = ['status' => AiRun::STATUS_COMMITTING_CHANGES];
+
+        $status = $this->runProcess(['git', 'status', '--short'], $path);
+        if (! $status->isSuccessful()) {
+            throw new Exception('Unable to inspect changes before commit: '.trim((string) $status->getErrorOutput()));
+        }
+
+        if (trim((string) $status->getOutput()) === '') {
+            return;
+        }
+
+        AiRun::query()->whereKey($this->aiRunId)->update($runStatus);
+
+        $add = $this->runProcess(['git', 'add', '--all'], $path);
+        if (! $add->isSuccessful()) {
+            throw new Exception('Unable to stage changes before commit: '.trim((string) $add->getErrorOutput()));
+        }
+
+        $diff = $this->runProcess(['git', 'diff', '--cached', '--quiet'], $path);
+        if ($diff->getExitCode() === 0) {
+            return;
+        }
+
+        if ($diff->getExitCode() !== 1) {
+            throw new Exception('Unable to inspect staged changes before commit: '.trim((string) $diff->getErrorOutput()));
+        }
+
+        $commit = $this->runProcess(
+            ['git', 'commit', '-m', $message],
+            $path,
+            $this->gitAuthorEnvironment($author),
+        );
+        if (! $commit->isSuccessful()) {
+            throw new Exception('Unable to commit changes: '.trim((string) $commit->getErrorOutput()));
+        }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function gitAuthorEnvironment(?User $author): array
+    {
+        if ($author === null || $author->github_username === null || $author->github_username === '' || $author->email === '') {
+            return [];
+        }
+
+        return [
+            'GIT_AUTHOR_NAME' => $author->github_username,
+            'GIT_AUTHOR_EMAIL' => $author->email,
+            'GIT_COMMITTER_NAME' => $author->github_username,
+            'GIT_COMMITTER_EMAIL' => $author->email,
+        ];
+    }
+
     private function log(AiRun $run, string $level, string $message, array $context = []): void
     {
         AiRunLog::create([
@@ -312,11 +429,15 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return base_path();
     }
 
-    private function runProcess(array|string $command, string $path): Process
+    /**
+     * @param  array<int, string>|string  $command
+     * @param  array<string, string>  $environment
+     */
+    private function runProcess(array|string $command, string $path, array $environment = []): Process
     {
         $process = is_array($command)
-            ? new Process($command, $path)
-            : Process::fromShellCommandline($command, $path);
+            ? new Process($command, $path, $environment)
+            : Process::fromShellCommandline($command, $path, $environment);
 
         $process->setTimeout(null);
         $process->run();

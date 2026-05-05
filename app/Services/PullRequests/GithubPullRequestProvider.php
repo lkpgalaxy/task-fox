@@ -9,7 +9,6 @@ use App\Models\AiRun;
 use App\Models\Task;
 use App\Models\User;
 use Exception;
-use Illuminate\Support\Str;
 use Symfony\Component\Process\Process;
 
 class GithubPullRequestProvider implements PullRequestProvider
@@ -19,7 +18,7 @@ class GithubPullRequestProvider implements PullRequestProvider
         $body = $this->buildPrBody($task);
         $repositoryPath = $this->resolveRepositoryPath($run);
 
-        $this->commitPendingChanges($repositoryPath, $task, $author);
+        $this->assertNoPendingChanges($repositoryPath);
 
         $result = $this->runProcess([
             'gh',
@@ -149,7 +148,7 @@ BODY;
         return (int) $matches[1];
     }
 
-    private function commitPendingChanges(string $path, Task $task, ?User $author): void
+    private function assertNoPendingChanges(string $path): void
     {
         $status = $this->runProcess(['git', 'status', '--short'], $path);
         if (! $status->isSuccessful()) {
@@ -160,45 +159,7 @@ BODY;
             return;
         }
 
-        $add = $this->runProcess(['git', 'add', '--all'], $path);
-        if (! $add->isSuccessful()) {
-            throw new Exception('Unable to stage changes before pull request creation: '.trim((string) $add->getErrorOutput()));
-        }
-
-        $diff = $this->runProcess(['git', 'diff', '--cached', '--quiet'], $path);
-        if ($diff->getExitCode() === 0) {
-            return;
-        }
-
-        if ($diff->getExitCode() !== 1) {
-            throw new Exception('Unable to inspect staged changes before pull request creation: '.trim((string) $diff->getErrorOutput()));
-        }
-
-        $commit = $this->runProcess(
-            ['git', 'commit', '-m', $this->makeCommitMessage($task)],
-            $path,
-            $this->gitAuthorEnvironment($author),
-        );
-        if (! $commit->isSuccessful()) {
-            throw new Exception('Unable to commit changes before pull request creation: '.trim((string) $commit->getErrorOutput()));
-        }
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private function gitAuthorEnvironment(?User $author): array
-    {
-        if ($author === null || $author->github_username === null || $author->github_username === '' || $author->email === '') {
-            return [];
-        }
-
-        return [
-            'GIT_AUTHOR_NAME' => $author->github_username,
-            'GIT_AUTHOR_EMAIL' => $author->email,
-            'GIT_COMMITTER_NAME' => $author->github_username,
-            'GIT_COMMITTER_EMAIL' => $author->email,
-        ];
+        throw new Exception('Pull request creation requires committed changes; commit before creating a pull request.');
     }
 
     /**
@@ -213,13 +174,6 @@ BODY;
         return [
             'GH_TOKEN' => $user->github_token,
         ];
-    }
-
-    private function makeCommitMessage(Task $task): string
-    {
-        $slug = Str::slug((string) $task->title);
-
-        return 'feat: complete task '.(string) $task->id.($slug !== '' ? ' '.$slug : '');
     }
 
     private function resolveExecutionPath(?string $path = null): string

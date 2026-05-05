@@ -21,6 +21,7 @@ use Illuminate\Support\Collection;
     'pull_request_url',
     'pull_request_number',
     'attempt_count',
+    'review_attempt_count',
     'last_error',
     'started_at',
     'finished_at',
@@ -37,6 +38,12 @@ class AiRun extends Model
 
     public const STATUS_TESTING = 'testing';
 
+    public const STATUS_REVIEWING_CHANGES = 'reviewing_changes';
+
+    public const STATUS_GENERATING_COMMIT_MESSAGE = 'generating_commit_message';
+
+    public const STATUS_COMMITTING_CHANGES = 'committing_changes';
+
     public const STATUS_CREATING_PR = 'creating_pr';
 
     public const STATUS_WAITING_FOR_MERGE = 'waiting_for_merge';
@@ -51,6 +58,9 @@ class AiRun extends Model
         self::STATUS_PLANNING,
         self::STATUS_IMPLEMENTING,
         self::STATUS_TESTING,
+        self::STATUS_REVIEWING_CHANGES,
+        self::STATUS_GENERATING_COMMIT_MESSAGE,
+        self::STATUS_COMMITTING_CHANGES,
         self::STATUS_CREATING_PR,
         self::STATUS_WAITING_FOR_MERGE,
     ];
