@@ -294,6 +294,7 @@ class CodexCodingAgent implements CodingAgent
                     return ($index + 1).". {$status} {$criterion['body']}";
                 })
                 ->join("\n");
+        $screenshotPath = storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
 
         return <<<PROMPT
 Implement task {$task->id}: {$task->title}
@@ -317,11 +318,12 @@ Acceptance-criteria-driven workflow:
 3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
 4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
 5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
-6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
-7. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
-8. Fix failing tests instead of ignoring them.
-9. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
-10. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+6. For frontend behavior, add backend assertions where possible, run TypeScript/lint checks for React/Inertia changes, and use Playwright to capture a screenshot of the implemented result at this absolute path outside the repository: {$screenshotPath}
+7. Create the screenshot directory if it does not exist, and include the screenshot path in your final response when a screenshot was captured.
+8. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+9. Fix failing tests instead of ignoring them.
+10. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
+11. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
 PROMPT;
     }
 
