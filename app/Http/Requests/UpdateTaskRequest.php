@@ -33,17 +33,6 @@ class UpdateTaskRequest extends FormRequest
             'reviewer_user_id' => ['nullable', 'integer', 'exists:users,id'],
             'source_input_id' => ['nullable', 'integer', 'exists:input_sources,id'],
             'project_id' => ['nullable', 'integer', 'exists:projects,id'],
-            'acceptance_criteria' => ['required', 'array'],
-            'acceptance_criteria.*.body' => ['required', 'string', 'max:1500'],
-            'acceptance_criteria.*.checked' => ['required', 'boolean'],
         ];
-    }
-
-    /**
-     * @return array<int, array{body: string, checked: bool}>
-     */
-    public function acceptanceCriteria(): array
-    {
-        return $this->validated('acceptance_criteria', []);
     }
 }

@@ -12,7 +12,6 @@ use Illuminate\Database\Query\Builder;
 #[Fillable([
     'title',
     'description',
-    'acceptance_criteria',
     'status',
     'priority',
     'deadline',
@@ -66,7 +65,6 @@ class Task extends Model
     protected function casts(): array
     {
         return [
-            'acceptance_criteria' => 'array',
             'deadline' => 'date',
             'approved_at' => 'datetime',
             'rejected_at' => 'datetime',

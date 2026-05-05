@@ -105,17 +105,6 @@ class GithubPullRequestProvider implements PullRequestProvider
 
     private function buildPrBody(Task $task): string
     {
-        $criteria = collect($task->acceptance_criteria ?? [])->values();
-
-        if ($criteria->isEmpty()) {
-            $criteria = collect([['body' => 'No acceptance criteria provided.', 'checked' => false]]);
-        }
-
-        $items = $criteria
-            ->filter(static fn (array $criterion): bool => isset($criterion['body']) && trim((string) $criterion['body']) !== '')
-            ->map(static fn (array $criterion): string => '- ['.($criterion['checked'] ? 'x' : ' ')."] {$criterion['body']}")
-            ->join("\n");
-
         $description = trim((string) $task->description);
         if ($description === '') {
             $description = 'No description provided.';
@@ -129,9 +118,6 @@ Source task:
 
 Description:
 {$description}
-
-Acceptance criteria:
-{$items}
 BODY;
     }
 

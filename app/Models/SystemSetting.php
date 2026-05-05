@@ -17,10 +17,21 @@ use Illuminate\Database\Eloquent\Model;
     'review_reasoning_effort',
     'commit_message_model',
     'commit_message_reasoning_effort',
+    'retry_limit',
 ])]
 class SystemSetting extends Model
 {
     use HasFactory;
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'retry_limit' => 'integer',
+        ];
+    }
 
     /**
      * @var array<string, string>
@@ -36,5 +47,6 @@ class SystemSetting extends Model
         'review_reasoning_effort' => 'high',
         'commit_message_model' => 'gpt-5.4-mini',
         'commit_message_reasoning_effort' => 'medium',
+        'retry_limit' => 3,
     ];
 }

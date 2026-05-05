@@ -72,6 +72,13 @@ class SystemSettingsResolver
         return $this->resolveModel('commit_message_reasoning_effort');
     }
 
+    public function retryLimit(): int
+    {
+        $value = $this->settings()->retry_limit;
+
+        return is_int($value) ? $value : (int) config('automation.agent.retry_limit', 3);
+    }
+
     /**
      * @return array{
      *     analyze_source_model: string|null,
@@ -83,7 +90,8 @@ class SystemSettingsResolver
      *     review_model: string|null,
      *     review_reasoning_effort: string|null,
      *     commit_message_model: string|null,
-     *     commit_message_reasoning_effort: string|null
+     *     commit_message_reasoning_effort: string|null,
+     *     retry_limit: int
      * }
      */
     public function snapshot(): array
@@ -99,6 +107,7 @@ class SystemSettingsResolver
             'review_reasoning_effort' => $this->reviewReasoningEffort(),
             'commit_message_model' => $this->commitMessageModel(),
             'commit_message_reasoning_effort' => $this->commitMessageReasoningEffort(),
+            'retry_limit' => $this->retryLimit(),
         ];
     }
 

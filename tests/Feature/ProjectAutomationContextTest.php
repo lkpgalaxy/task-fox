@@ -36,9 +36,6 @@ test('manual tasks can be created without a project', function () {
         'assignee_user_id' => null,
         'source_input_id' => null,
         'project_id' => null,
-        'acceptance_criteria' => [
-            ['body' => 'Task is created without a project.', 'checked' => false],
-        ],
     ])->assertRedirect(route('tasks.index'));
 
     $task = Task::query()->sole();
@@ -59,9 +56,6 @@ test('approve requires a project before changing task status', function () {
     $task = Task::create([
         'title' => 'Projectless task',
         'description' => 'Should be blocked until a project is assigned.',
-        'acceptance_criteria' => [
-            ['body' => 'Requires project before workflow action.', 'checked' => false],
-        ],
         'status' => Task::STATUS_PENDING_APPROVAL,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -88,11 +82,15 @@ test('reject marks task rejected and dispatches the next task without a project'
     $task = Task::create([
         'title' => 'Projectless rejection',
         'description' => 'Should be rejectable without repository context.',
-        'acceptance_criteria' => [
-            ['body' => 'Can be rejected during triage.', 'checked' => false],
-        ],
         'status' => Task::STATUS_PENDING_APPROVAL,
         'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_WAITING_FOR_MERGE,
+        'branch_name' => 'ai-task-'.$task->id.'-projectless-rejection',
+        'workspace_path' => '/tmp/task-fox',
+        'base_branch' => 'main',
     ]);
 
     $this->from(route('tasks.index'))->post(route('tasks.reject', $task))
@@ -103,6 +101,11 @@ test('reject marks task rejected and dispatches the next task without a project'
         ->project_id->toBeNull()
         ->status->toBe(Task::STATUS_REJECTED)
         ->rejected_at->not->toBeNull();
+
+    expect($run->refresh())
+        ->status->toBe(TaskRun::STATUS_REJECTED)
+        ->last_error->toBe('Task rejected.')
+        ->finished_at->not->toBeNull();
 
     Queue::assertPushed(DispatchNextTaskRunJob::class);
 });
@@ -119,9 +122,6 @@ test('failed tasks can be retried and queued for execution', function () {
     $task = Task::create([
         'title' => 'Retry failed run',
         'description' => 'A failed task should be eligible for another run.',
-        'acceptance_criteria' => [
-            ['body' => 'Retry schedules another task run.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -172,9 +172,6 @@ test('retry rejects failed tasks without a matching resumable task run', functio
     $task = Task::create([
         'title' => 'Changed failed run',
         'description' => 'Retry requires a matching request hash.',
-        'acceptance_criteria' => [
-            ['body' => 'Retry is blocked.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -213,9 +210,6 @@ test('failed tasks can be rerun with a fresh queued workflow run', function () {
     $task = Task::create([
         'title' => 'Rerun failed workflow',
         'description' => 'A failed task should be eligible for a fresh workflow run.',
-        'acceptance_criteria' => [
-            ['body' => 'Rerun creates a new task run.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -277,9 +271,6 @@ test('only failed tasks can be rerun', function () {
     $task = Task::create([
         'title' => 'Already approved',
         'description' => 'Rerun should be limited to failed tasks.',
-        'acceptance_criteria' => [
-            ['body' => 'Non-failed task is not queued.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -303,9 +294,6 @@ test('rerun requires a project before creating a fresh workflow run', function (
     $task = Task::create([
         'title' => 'Projectless rerun',
         'description' => 'Rerun needs repository context.',
-        'acceptance_criteria' => [
-            ['body' => 'Project is required.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -335,9 +323,6 @@ test('rerun requires an actor before creating a fresh workflow run', function ()
     $task = Task::create([
         'title' => 'Actorless rerun',
         'description' => 'Rerun needs an approval actor.',
-        'acceptance_criteria' => [
-            ['body' => 'Actor is required.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -378,9 +363,6 @@ test('dispatch reuses the latest failed resumable task run and preserves logs', 
     $task = Task::create([
         'title' => 'Reuse failed run',
         'description' => 'Retry should not create a replacement run.',
-        'acceptance_criteria' => [
-            ['body' => 'Old logs remain attached.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -457,9 +439,6 @@ test('dispatch starts a queued resumable retry run for the selected task', funct
     $task = Task::create([
         'title' => 'Start queued retry',
         'description' => 'Retry queued run should not block itself.',
-        'acceptance_criteria' => [
-            ['body' => 'Queued retry is dispatched.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -498,9 +477,6 @@ test('editing request fields after failure requires approval for a fresh run and
     $task = Task::create([
         'title' => 'Edit failed task',
         'description' => 'Failed task content.',
-        'acceptance_criteria' => [
-            ['body' => 'Original criterion.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'approved_by_user_id' => auth()->id(),
@@ -532,9 +508,6 @@ test('editing request fields after failure requires approval for a fresh run and
         'reviewer_user_id' => null,
         'project_id' => $project->id,
         'source_input_id' => null,
-        'acceptance_criteria' => [
-            ['body' => 'Updated criterion.', 'checked' => false],
-        ],
     ])->assertRedirect(route('tasks.index', ['task' => $task->id]));
 
     expect($task->refresh())
@@ -556,9 +529,6 @@ test('only failed tasks can be retried', function () {
     $task = Task::create([
         'title' => 'Already pending',
         'description' => 'Retry should be limited to failed tasks.',
-        'acceptance_criteria' => [
-            ['body' => 'Non-failed task is not queued.', 'checked' => false],
-        ],
         'status' => Task::STATUS_PENDING_APPROVAL,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -599,9 +569,6 @@ test('task run creation snapshots project workspace path and base branch', funct
     $task = Task::create([
         'title' => 'Run against project repository',
         'description' => 'task run should use project repository settings.',
-        'acceptance_criteria' => [
-            ['body' => 'Run snapshots repository context.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -639,9 +606,6 @@ test('task run snapshot defaults blank project base branch to main', function ()
     $task = Task::create([
         'title' => 'Run against main',
         'description' => 'Blank base branch should default to main.',
-        'acceptance_criteria' => [
-            ['body' => 'Base branch defaults to main.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'project_id' => $project->id,
@@ -665,9 +629,6 @@ test('failed approved task keeps approval audit fields', function () {
     $task = Task::create([
         'title' => 'Preserve approval on failure',
         'description' => 'A failed run should not erase approval history.',
-        'acceptance_criteria' => [
-            ['body' => 'Approval metadata remains visible.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'approved_by_user_id' => $approver->id,
@@ -732,9 +693,6 @@ test('codex coding agent uses the run workspace as codex workspace and process c
     $task = Task::create([
         'title' => 'Implement in workspace',
         'description' => 'The coding agent must run inside the project workspace.',
-        'acceptance_criteria' => [
-            ['body' => 'Workspace is set for Codex.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -791,9 +749,6 @@ test('codex coding agent omits the model flag when the implementation model is b
     $task = Task::create([
         'title' => 'Implement without model',
         'description' => 'The coding agent should fall back to Codex defaults.',
-        'acceptance_criteria' => [
-            ['body' => 'Workspace is set for Codex.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -837,9 +792,6 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
     $task = Task::create([
         'title' => 'Plan in workspace',
         'description' => 'The coding agent must plan without mutating files.',
-        'acceptance_criteria' => [
-            ['body' => 'Planning uses a read-only sandbox.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -883,9 +835,6 @@ test('codex review command uses native base branch review mode', function () {
     $task = Task::create([
         'title' => 'Review with native mode',
         'description' => 'Review should use Codex native review mode.',
-        'acceptance_criteria' => [
-            ['body' => 'Review findings are structured.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -929,9 +878,6 @@ test('pull request review is requested from the project default reviewer before 
     $task = Task::create([
         'title' => 'Open reviewed PR',
         'description' => 'Default reviewer should be requested.',
-        'acceptance_criteria' => [
-            ['body' => 'Default reviewer receives the review request.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'assignee_user_id' => $assignee->id,
@@ -968,9 +914,6 @@ test('pull request review is skipped when the reviewer resolves to the pull requ
     $task = Task::create([
         'title' => 'Open reviewed PR',
         'description' => 'Assignee cannot review their own pull request.',
-        'acceptance_criteria' => [
-            ['body' => 'Self-review requests are skipped.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'assignee_user_id' => $assignee->id,
@@ -1016,9 +959,6 @@ test('pull request review is skipped when the reviewer resolves to the approving
     $task = Task::create([
         'title' => 'Open reviewed PR',
         'description' => 'Approver cannot review their own pull request.',
-        'acceptance_criteria' => [
-            ['body' => 'Approver review requests are skipped.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'approved_by_user_id' => $approver->id,
@@ -1064,9 +1004,6 @@ test('pull request review uses task reviewer before project default reviewer', f
     $task = Task::create([
         'title' => 'Open reviewed PR',
         'description' => 'Task reviewer should be requested.',
-        'acceptance_criteria' => [
-            ['body' => 'Task reviewer receives the review request.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'reviewer_user_id' => $taskReviewer->id,
@@ -1133,6 +1070,7 @@ test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retr
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Store failed test output');
     $run = createAutomationRun($task, $repositoryPath, 'task/store-failed-test-output');
+    $run->update(['retry_limit' => 1]);
 
     test()->instance(
         CodingAgent::class,
@@ -1171,7 +1109,86 @@ test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retr
         ->toContain('no such table: sessions');
 });
 
-test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria before commit', function () {
+test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit from task run snapshot', function () {
+    Queue::fake();
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Finite implementation retry limit');
+    $run = createAutomationRun($task, $repositoryPath, 'task/finite-implementation-retry-limit');
+    $run->update(['retry_limit' => 2]);
+    $testsCountPath = $repositoryPath.'/tests-count.txt';
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1)]);
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry implementation once.']));
+            $mock->shouldReceive('run')
+                ->twice()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: finite implementation retry']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->attempt_count->toBe(2)
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+});
+
+test('RunApprovedTaskWithCodingAgentJob retries implementation without limit when snapshot retry limit is unlimited', function () {
+    Queue::fake();
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Unlimited implementation retries');
+    $run = createAutomationRun($task, $repositoryPath, 'task/unlimited-implementation-retries');
+    $run->update(['retry_limit' => -1]);
+    $testsCountPath = $repositoryPath.'/tests-count.txt';
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1).' && false']);
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($testsCountPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry until tests pass.']));
+            $mock->shouldReceive('run')
+                ->times(3)
+                ->andReturnUsing(function () use ($testsCountPath): CodingAgentResult {
+                    if (is_file($testsCountPath) && trim((string) file_get_contents($testsCountPath)) === '2') {
+                        config(['automation.tests.command' => 'true']);
+                    }
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: unlimited implementation retry']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->attempt_count->toBe(3)
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
+});
+
+test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
 
@@ -1226,25 +1243,18 @@ test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria
 
     expect($events)->toBe(['planning', 'implementation', 'review', 'commit-message', 'pull-request'])
         ->and($run->refresh()->plan)->toBe('Implement before review.')
-        ->and($task->refresh()->acceptance_criteria)->toBe([
-            ['body' => 'Automation completes.', 'checked' => true],
-        ])
         ->and(collect($run->workflowCheckpoints())->pluck('name')->all())->toBe([
             TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
             TaskRun::CHECKPOINT_PLANNED,
             TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
             TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_REVIEWED,
-            TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_COMMITTED,
             TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
             TaskRun::CHECKPOINT_REVIEW_REQUESTED,
             TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED,
         ])
         ->and(array_search('Coding agent review passed', $logMessages, true))->toBeLessThan(
-            array_search('Acceptance criteria verified', $logMessages, true),
-        )
-        ->and(array_search('Acceptance criteria verified', $logMessages, true))->toBeLessThan(
             array_search('Coding agent commit message generation started', $logMessages, true),
         );
 });
@@ -1462,11 +1472,12 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
 
 test('RunApprovedTaskWithCodingAgentJob skips review after retry limit and continues', function () {
     Queue::fake();
-    config(['automation.agent.retry_limit' => 1]);
+    config(['automation.agent.retry_limit' => 3]);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Review failures continue');
     $run = createAutomationRun($task, $repositoryPath, 'task/review-failures-continue');
+    $run->update(['retry_limit' => 1]);
     $testsCountPath = $repositoryPath.'/tests-count.txt';
     config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath)]);
 
@@ -1731,19 +1742,11 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
-    $run->forceFill([
-        'workflow_state' => array_merge($run->workflow_state, [
-            'checkpoints' => collect($run->workflowCheckpoints())
-                ->reject(fn (array $checkpoint): bool => $checkpoint['name'] === TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED)
-                ->values()
-                ->all(),
-        ]),
-    ])->save();
     $run->update(['status' => TaskRun::STATUS_FAILED]);
 
     test()->instance(
         CodingAgent::class,
-        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($task, $run): void {
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
             $mock->shouldReceive('plan')->never();
             $mock->shouldReceive('run')->never();
             $mock->shouldReceive('reviewChanges')
@@ -1751,14 +1754,7 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
-                ->andReturnUsing(function () use ($task, $run): CodingAgentResult {
-                    expect($task->refresh()->acceptance_criteria)->toBe([
-                        ['body' => 'Automation completes.', 'checked' => true],
-                    ])
-                        ->and($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED))->toBeTrue();
-
-                    return new CodingAgentResult(successful: true, payload: ['message' => 'test: resume from review']);
-                });
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: resume from review']));
         })
     );
     bindSuccessfulAuxiliaryMocks();
@@ -1769,17 +1765,13 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->attempt_count->toBe(0)
         ->review_attempt_count->toBe(1)
-        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue()
-        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED))->toBeTrue();
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue();
 });
 
 test('task run retries the failed checkpoint before the next pending checkpoint', function () {
     $task = Task::create([
         'title' => 'Retry failed checkpoint',
         'description' => 'Retry should resume the failed checkpoint.',
-        'acceptance_criteria' => [
-            ['body' => 'The failed checkpoint is retried first.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -1801,9 +1793,6 @@ test('task run workflow initializes planning before implementation verification'
     $task = Task::create([
         'title' => 'Plan before implementation',
         'description' => 'Planning should be an automatic checkpoint.',
-        'acceptance_criteria' => [
-            ['body' => 'Planning appears before implementation.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -1821,7 +1810,6 @@ test('task run workflow initializes planning before implementation verification'
         TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
         TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_REVIEWED,
-        TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_COMMITTED,
         TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
         TaskRun::CHECKPOINT_REVIEW_REQUESTED,
@@ -1833,9 +1821,6 @@ test('task run retries a failed planning checkpoint before implementation', func
     $task = Task::create([
         'title' => 'Retry failed planning',
         'description' => 'Retry should resume planning before implementation.',
-        'acceptance_criteria' => [
-            ['body' => 'The failed planning checkpoint is retried first.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -1891,61 +1876,6 @@ test('failed planning stores checkpoint failure and does not run implementation'
         ->plan->toBeNull()
         ->and($run->checkpoint(TaskRun::CHECKPOINT_PLANNED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
-});
-
-test('verified implementation marks unchecked acceptance criteria as checked', function () {
-    Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
-    $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Mark criteria verified');
-    $task->forceFill([
-        'acceptance_criteria' => [
-            ['body' => 'Implementation is present.', 'checked' => false],
-            ['body' => 'Existing behavior is already verified.', 'checked' => true],
-        ],
-    ])->save();
-    $run = createAutomationRun($task, $repositoryPath, 'task/mark-criteria-verified');
-
-    test()->instance(
-        CodingAgent::class,
-        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
-            $mock->shouldReceive('plan')
-                ->once()
-                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Verify all acceptance criteria.']));
-            $mock->shouldReceive('run')
-                ->once()
-                ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
-                    file_put_contents($repositoryPath.'/verified.txt', "Verified\n");
-
-                    return new CodingAgentResult(successful: true);
-                });
-            $mock->shouldReceive('reviewChanges')
-                ->once()
-                ->andReturn(new CodingAgentResult(successful: true));
-            $mock->shouldReceive('generateCommitMessage')
-                ->once()
-                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: mark criteria verified']));
-        })
-    );
-    bindSuccessfulAuxiliaryMocks();
-
-    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
-
-    expect($task->refresh()->acceptance_criteria)->toBe([
-        ['body' => 'Implementation is present.', 'checked' => true],
-        ['body' => 'Existing behavior is already verified.', 'checked' => true],
-    ]);
-
-    $log = TaskRunLog::query()
-        ->where('task_run_id', $run->id)
-        ->where('message', 'Acceptance criteria verified')
-        ->sole();
-
-    expect($log->context)->toMatchArray([
-        'verified_count' => 2,
-        'newly_verified_count' => 1,
-    ]);
 });
 
 test('repository checkpoint retry checks out existing ai branch without resetting work', function () {
@@ -2075,9 +2005,6 @@ test('failed task can create a pull request from the latest task run branch', fu
     $task = Task::create([
         'title' => 'Open manual PR',
         'description' => 'A failed run can still have useful changes to open.',
-        'acceptance_criteria' => [
-            ['body' => 'Manual PR is created from the run branch.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
         'assignee_user_id' => $assignee->id,
@@ -2137,9 +2064,6 @@ test('manual pull request creation requires profile identity before changing run
     $task = Task::create([
         'title' => 'Missing identity',
         'description' => 'Manual PR creation requires a Git author.',
-        'acceptance_criteria' => [
-            ['body' => 'Manual PR is blocked without profile identity.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2181,9 +2105,6 @@ test('manual pull request creation requires a saved github token before changing
     $task = Task::create([
         'title' => 'Missing token',
         'description' => 'Manual PR creation requires a GitHub token.',
-        'acceptance_criteria' => [
-            ['body' => 'Manual PR is blocked without a token.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2220,9 +2141,6 @@ test('manual pull request creation requires a latest task run branch', function 
     $task = Task::create([
         'title' => 'Missing branch',
         'description' => 'A branch is required to create a pull request.',
-        'acceptance_criteria' => [
-            ['body' => 'Manual PR is blocked without a branch.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2260,9 +2178,6 @@ test('manual pull request creation rejects tasks with an existing pull request r
     $task = Task::create([
         'title' => 'Do not duplicate PRs',
         'description' => 'Manual creation should not open a second pull request.',
-        'acceptance_criteria' => [
-            ['body' => 'Existing PR runs block duplicate manual PRs.', 'checked' => false],
-        ],
         'status' => Task::STATUS_FAILED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2294,9 +2209,6 @@ test('refresh pull request uses the latest pull request bearing task run', funct
     $task = Task::create([
         'title' => 'Refresh existing PR',
         'description' => 'Refresh should ignore newer runs without pull requests.',
-        'acceptance_criteria' => [
-            ['body' => 'The PR-bearing run is refreshed.', 'checked' => false],
-        ],
         'status' => Task::STATUS_PR_CREATED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2337,9 +2249,6 @@ test('task run logs remain attached to their task run', function () {
     $task = Task::create([
         'title' => 'Log by run',
         'description' => 'Logs should resolve through task runs.',
-        'acceptance_criteria' => [
-            ['body' => 'The log belongs to its task run.', 'checked' => false],
-        ],
         'status' => Task::STATUS_RUNNING,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -2497,9 +2406,6 @@ function createApprovedAutomationTask(string $repositoryPath, string $title, ?Us
     return Task::create([
         'title' => $title,
         'description' => 'Run the approved automation flow.',
-        'acceptance_criteria' => [
-            ['body' => 'Automation completes.', 'checked' => false],
-        ],
         'status' => Task::STATUS_APPROVED,
         'priority' => Task::PRIORITY_MEDIUM,
         'assignee_user_id' => $assignee?->id,

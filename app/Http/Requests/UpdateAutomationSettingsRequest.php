@@ -21,6 +21,7 @@ class UpdateAutomationSettingsRequest extends FormRequest
             'review_reasoning_effort' => $this->normalizeModelInput('review_reasoning_effort'),
             'commit_message_model' => $this->normalizeModelInput('commit_message_model'),
             'commit_message_reasoning_effort' => $this->normalizeModelInput('commit_message_reasoning_effort'),
+            'retry_limit' => $this->normalizeRetryLimitInput(),
         ]);
     }
 
@@ -45,6 +46,7 @@ class UpdateAutomationSettingsRequest extends FormRequest
             'review_reasoning_effort' => ['nullable', 'string', Rule::in(SystemSettingsResolver::REASONING_EFFORTS)],
             'commit_message_model' => ['nullable', 'string', 'max:255'],
             'commit_message_reasoning_effort' => ['nullable', 'string', Rule::in(SystemSettingsResolver::REASONING_EFFORTS)],
+            'retry_limit' => ['nullable', 'integer', 'min:-1', 'not_in:0'],
         ];
     }
 
@@ -53,5 +55,16 @@ class UpdateAutomationSettingsRequest extends FormRequest
         $value = trim((string) $this->input($field));
 
         return $value === '' ? null : $value;
+    }
+
+    private function normalizeRetryLimitInput(): int|string|null
+    {
+        $value = trim((string) $this->input('retry_limit'));
+
+        if ($value === '') {
+            return null;
+        }
+
+        return preg_match('/^-?\d+$/', $value) === 1 ? (int) $value : $value;
     }
 }

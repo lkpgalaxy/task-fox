@@ -32,9 +32,6 @@ test('it normalizes agent task analysis into extractor format', function () {
                             'assignee_github_username' => '@linh',
                             'priority' => 'HIGH',
                             'deadline' => '2026-05-10',
-                            'acceptance_criteria' => [
-                                ['body' => 'Uploaded file metadata is stored on the input source.', 'checked' => true],
-                            ],
                             'questions' => ['Should scanned PDFs use OCR?', 'Should scanned PDFs use OCR?'],
                         ],
                         [
@@ -43,9 +40,6 @@ test('it normalizes agent task analysis into extractor format', function () {
                             'project_id' => 'unknown',
                             'priority' => 'invalid',
                             'deadline' => 'next week',
-                            'acceptance_criteria' => [
-                                ['body' => ['No', 'array conversion warning'], 'checked' => false],
-                            ],
                             'questions' => [['Nested', 'question']],
                         ],
                     ],
@@ -71,9 +65,6 @@ test('it normalizes agent task analysis into extractor format', function () {
             'assignee_github_username' => 'linh',
             'priority' => 'high',
             'deadline' => '2026-05-10',
-            'acceptance_criteria' => [
-                ['body' => 'Uploaded file metadata is stored on the input source.', 'checked' => true],
-            ],
             'questions' => ['Should scanned PDFs use OCR?'],
         ])
         ->and($tasks[1]['title'])->toBe('Create fallback validation')
@@ -81,8 +72,6 @@ test('it normalizes agent task analysis into extractor format', function () {
         ->and($tasks[1]['project_id'])->toBeNull()
         ->and($tasks[1]['priority'])->toBeNull()
         ->and($tasks[1]['deadline'])->toBeNull()
-        ->and($tasks[1]['acceptance_criteria'])->toBe([
-            ['body' => 'No array conversion warning', 'checked' => false],
-        ])
+        ->and($tasks[1])->not->toHaveKey('acceptance_criteria')
         ->and($tasks[1]['questions'])->toBe(['Nested question']);
 });

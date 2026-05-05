@@ -178,7 +178,6 @@ class TaskController extends Controller
         Task::create([
             'title' => (string) Arr::get($data, 'title'),
             'description' => (string) Arr::get($data, 'description'),
-            'acceptance_criteria' => $this->normalizeCriteria($request->acceptanceCriteria()),
             'status' => Task::STATUS_DRAFT,
             'priority' => Arr::get($data, 'priority') ?? Task::PRIORITY_MEDIUM,
             'deadline' => Arr::get($data, 'deadline'),
@@ -198,9 +197,7 @@ class TaskController extends Controller
         $actor = $this->resolveCurrentUser();
         $data = $request->validated();
 
-        $criteria = $request->acceptanceCriteria();
-
-        $approvalFieldsChanged = $this->isApprovedFieldChanged($task, $data, $criteria);
+        $approvalFieldsChanged = $this->isApprovedFieldChanged($task, $data);
         $shouldResetApproval = in_array($task->status, [Task::STATUS_APPROVED, Task::STATUS_FAILED], true)
             && $approvalFieldsChanged;
 
@@ -216,7 +213,6 @@ class TaskController extends Controller
                 'project_id',
             ]),
         );
-        $task->acceptance_criteria = $this->normalizeCriteria($criteria);
         $task->status = $shouldResetApproval ? Task::STATUS_PENDING_APPROVAL : $task->status;
 
         if ($shouldResetApproval) {
@@ -355,6 +351,14 @@ class TaskController extends Controller
             'approved_at' => null,
             'approved_by_user_id' => null,
         ]);
+
+        $task->taskRuns()
+            ->whereIn('status', TaskRun::ACTIVE_STATUSES)
+            ->update([
+                'status' => TaskRun::STATUS_REJECTED,
+                'last_error' => 'Task rejected.',
+                'finished_at' => now(),
+            ]);
 
         if ($task->externalTaskLink) {
             $this->recordExternalMessage(
@@ -621,7 +625,7 @@ class TaskController extends Controller
             ->with('status', "Pull request state is {$state->value}.");
     }
 
-    private function isApprovedFieldChanged(Task $task, array $data, array $criteria): bool
+    private function isApprovedFieldChanged(Task $task, array $data): bool
     {
         $candidate = $task->replicate();
         $candidate->fill(Arr::only($data, Task::APPROVAL_FIELDS));
@@ -632,19 +636,7 @@ class TaskController extends Controller
             }
         }
 
-        return $this->normalizeCriteria($task->acceptance_criteria ?? []) !== $this->normalizeCriteria($criteria);
-    }
-
-    private function normalizeCriteria(array $criteria): array
-    {
-        return Collection::make($criteria)
-            ->map(fn (array $criterion): array => [
-                'body' => (string) Arr::get($criterion, 'body', ''),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->filter(fn (array $criterion): bool => $criterion['body'] !== '')
-            ->values()
-            ->toArray();
+        return false;
     }
 
     private function serializeTask(Task $task, bool $withDetails = false): array
@@ -683,7 +675,6 @@ class TaskController extends Controller
                     'github_username' => $task->project->defaultReviewer->github_username,
                 ] : null,
             ] : null,
-            'acceptance_criteria' => $this->normalizeCriteria($task->acceptance_criteria ?? []),
             'created_at' => $task->created_at?->toIso8601String(),
             'updated_at' => $task->updated_at?->toIso8601String(),
             'latest_task_run' => optional($task->latestTaskRun)?->only(['id', 'status', 'branch_name', 'pull_request_url', 'pull_request_number', 'workflow_state']),

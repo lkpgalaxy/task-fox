@@ -28,6 +28,7 @@ class SystemSettingFactory extends Factory
             'review_reasoning_effort' => 'high',
             'commit_message_model' => 'gpt-5.4-mini',
             'commit_message_reasoning_effort' => 'medium',
+            'retry_limit' => 3,
         ];
     }
 }

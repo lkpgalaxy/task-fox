@@ -121,6 +121,7 @@ test('admins can update automation model settings from the profile page', functi
         'review_reasoning_effort' => 'high',
         'commit_message_model' => 'gpt-5.4-mini',
         'commit_message_reasoning_effort' => 'medium',
+        'retry_limit' => 3,
     ]);
 
     $this->actingAs($admin)
@@ -138,6 +139,7 @@ test('admins can update automation model settings from the profile page', functi
             ->where('automationSettings.review_reasoning_effort', 'high')
             ->where('automationSettings.commit_message_model', 'gpt-5.4-mini')
             ->where('automationSettings.commit_message_reasoning_effort', 'medium')
+            ->where('automationSettings.retry_limit', 3)
         );
 
     $this->actingAs($admin)
@@ -152,6 +154,7 @@ test('admins can update automation model settings from the profile page', functi
             'review_reasoning_effort' => '  ',
             'commit_message_model' => 'gpt-5.4-mini',
             'commit_message_reasoning_effort' => 'medium',
+            'retry_limit' => '5',
         ])
         ->assertRedirect(route('profile.edit'));
 
@@ -165,7 +168,16 @@ test('admins can update automation model settings from the profile page', functi
         ->and(SystemSetting::query()->sole()->review_model)->toBeNull()
         ->and(SystemSetting::query()->sole()->review_reasoning_effort)->toBeNull()
         ->and(SystemSetting::query()->sole()->commit_message_model)->toBe('gpt-5.4-mini')
-        ->and(SystemSetting::query()->sole()->commit_message_reasoning_effort)->toBe('medium');
+        ->and(SystemSetting::query()->sole()->commit_message_reasoning_effort)->toBe('medium')
+        ->and(SystemSetting::query()->sole()->retry_limit)->toBe(5);
+
+    $this->actingAs($admin)
+        ->patch(route('profile.automation.update'), validAutomationSettingsPayload([
+            'retry_limit' => '-1',
+        ]))
+        ->assertRedirect(route('profile.edit'));
+
+    expect(SystemSetting::query()->sole()->retry_limit)->toBe(-1);
 });
 
 test('automation model settings reject unsupported reasoning effort values', function () {
@@ -188,6 +200,22 @@ test('automation model settings reject unsupported reasoning effort values', fun
         ])
         ->assertSessionHasErrors('analyze_source_reasoning_effort');
 });
+
+test('automation settings reject invalid retry limits', function (mixed $retryLimit) {
+    $admin = User::factory()->create([
+        'role' => User::ROLE_ADMIN,
+    ]);
+
+    $this->actingAs($admin)
+        ->patch(route('profile.automation.update'), validAutomationSettingsPayload([
+            'retry_limit' => $retryLimit,
+        ]))
+        ->assertSessionHasErrors('retry_limit');
+})->with([
+    'zero' => ['0'],
+    'below negative one' => ['-2'],
+    'decimal' => ['1.5'],
+]);
 
 test('non-admins cannot update automation model settings', function () {
     $user = User::factory()->create();
@@ -213,6 +241,27 @@ test('non-admins cannot update automation model settings', function () {
 
     expect(SystemSetting::query()->sole()->analyze_source_model)->toBe('gpt-5.5');
 });
+
+/**
+ * @param  array<string, mixed>  $overrides
+ * @return array<string, mixed>
+ */
+function validAutomationSettingsPayload(array $overrides = []): array
+{
+    return array_merge([
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+        'plan_model' => 'gpt-5.5',
+        'plan_reasoning_effort' => 'high',
+        'implement_model' => 'gpt-5.5',
+        'implement_reasoning_effort' => 'medium',
+        'review_model' => 'gpt-5.5',
+        'review_reasoning_effort' => 'high',
+        'commit_message_model' => 'gpt-5.4-mini',
+        'commit_message_reasoning_effort' => 'medium',
+        'retry_limit' => '3',
+    ], $overrides);
+}
 
 test('users can update their own password with current password confirmation', function () {
     $user = User::factory()->create([

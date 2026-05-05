@@ -21,6 +21,7 @@ type AutomationSettings = {
     review_reasoning_effort: string | null;
     commit_message_model: string | null;
     commit_message_reasoning_effort: string | null;
+    retry_limit: number | null;
 };
 
 export default function ProfileEdit() {
@@ -56,6 +57,7 @@ export default function ProfileEdit() {
         commit_message_model: automationSettings?.commit_message_model ?? '',
         commit_message_reasoning_effort:
             automationSettings?.commit_message_reasoning_effort ?? '',
+        retry_limit: automationSettings?.retry_limit?.toString() ?? '',
     });
 
     const submitProfile = (event: FormEvent<HTMLFormElement>) => {
@@ -394,6 +396,27 @@ export default function ProfileEdit() {
                                     }
                                 />
                             </div>
+                            <div className="max-w-sm">
+                                <Field
+                                    label="Retry limit"
+                                    error={automationForm.errors.retry_limit}
+                                >
+                                    <Input
+                                        type="number"
+                                        step="1"
+                                        min="-1"
+                                        value={
+                                            automationForm.data.retry_limit
+                                        }
+                                        onChange={(event) =>
+                                            automationForm.setData(
+                                                'retry_limit',
+                                                event.target.value,
+                                            )
+                                        }
+                                    />
+                                </Field>
+                            </div>
                             <div className="flex justify-end">
                                 <Button
                                     type="submit"
@@ -402,7 +425,7 @@ export default function ProfileEdit() {
                                 >
                                     {automationForm.processing
                                         ? 'Saving...'
-                                        : 'Save automation models'}
+                                        : 'Save automation settings'}
                                 </Button>
                             </div>
                         </form>

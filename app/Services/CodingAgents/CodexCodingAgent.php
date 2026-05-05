@@ -9,7 +9,6 @@ use App\Models\Task;
 use App\Models\TaskRun;
 use App\Services\SystemSettingsResolver;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
 use JsonException;
 use Symfony\Component\Process\Process;
@@ -26,14 +25,6 @@ class CodexCodingAgent implements CodingAgent
 
     public function run(Task $task, TaskRun $run): CodingAgentResult
     {
-        if ($this->acceptanceCriteria($task)->isEmpty()) {
-            return new CodingAgentResult(
-                successful: false,
-                messages: [],
-                error: 'Acceptance criteria are required before implementation.',
-            );
-        }
-
         $prompt = $this->buildTaskPrompt($task, $run);
 
         $command = $this->buildCommand(
@@ -312,7 +303,6 @@ class CodexCodingAgent implements CodingAgent
 
     private function buildTaskPrompt(Task $task, TaskRun $run): string
     {
-        $criteria = $this->acceptanceCriteria($task);
         $plan = trim((string) $run->plan);
         $planBlock = $plan !== '' ? $plan : 'No stored implementation plan was recorded.';
         $previousFailure = trim((string) $run->last_error);
@@ -320,24 +310,11 @@ class CodexCodingAgent implements CodingAgent
             ? "Previous verification failure:\n".$this->limitPromptText($previousFailure, 12000)
             : 'Previous verification failure: none recorded.';
 
-        $criteriaList = $criteria->isEmpty()
-            ? '- No acceptance criteria were provided.'
-            : $criteria
-                ->map(static function (array $criterion, int $index): string {
-                    $status = $criterion['checked'] ? '[x]' : '[ ]';
-
-                    return ($index + 1).". {$status} {$criterion['body']}";
-                })
-                ->join("\n");
-
         return <<<PROMPT
 Implement task {$task->id}: {$task->title}
 
 Description:
 {$task->description}
-
-Acceptance criteria:
-{$criteriaList}
 
 Stored implementation plan:
 {$planBlock}
@@ -345,23 +322,17 @@ Stored implementation plan:
 {$previousFailureBlock}
 
 Plan-following instructions:
-- Follow the stored implementation plan above as the implementation contract for this run.
-- Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.
-
-Acceptance-criteria-driven workflow:
-1. Before implementation, extract and list every acceptance criterion from the task.
-2. Treat [x] criteria as already verified and [ ] criteria as the remaining contract to satisfy.
-3. Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
-4. If any criterion is missing, unclear, or not testable, pause and ask for clarification before implementation.
-5. Add or update Pest feature/unit tests so each acceptance criterion has direct coverage.
-6. For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
-7. Do not start the application or dev server for screenshots; screenshot verification runs in a separate workflow step.
-8. If a previous verification failure is recorded, diagnose that failure first and make the smallest code, test, config, or migration fix needed before continuing.
-9. Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
-10. If tests fail because the database schema is stale or missing tables, inspect the test database configuration and run the appropriate Laravel migration or test database setup command before changing unrelated code.
-11. Fix failing tests instead of ignoring them.
-12. Before finishing, explicitly mark every verified criterion as [x] in your final checklist.
-13. Final response must include the acceptance-criteria checklist, tests run, and whether they passed.
+- Treat the task title, description, stored plan, previous failure, tests, screenshot verification, and code review as the implementation contract.
+- Pause and fail only if the stored plan is impossible to execute or contradicts the current task description.
+- Inspect the relevant Laravel/Inertia code, existing tests, DESIGN.md for UI work, and version-specific docs before planning code changes.
+- Add or update Pest feature/unit tests for changed behavior.
+- For frontend behavior, add backend assertions where possible and run TypeScript/lint checks for React/Inertia changes.
+- Do not start the application or dev server for screenshots; screenshot verification runs in a separate workflow step.
+- If a previous verification failure is recorded, diagnose that failure first and make the smallest code, test, config, or migration fix needed before continuing.
+- Run targeted tests first, then broader verification: vendor/bin/pint --dirty --format agent if PHP changed, npm run types:check and npm run lint:check if frontend changed, and php artisan test --compact for the final Laravel pass.
+- If tests fail because the database schema is stale or missing tables, inspect the test database configuration and run the appropriate Laravel migration or test database setup command before changing unrelated code.
+- Fix failing tests instead of ignoring them.
+- Final response must include the tests run and whether they passed.
 PROMPT;
     }
 
@@ -392,17 +363,6 @@ PROMPT;
 
     private function buildPlanningPrompt(Task $task, TaskRun $run): string
     {
-        $criteria = $this->acceptanceCriteria($task);
-        $criteriaList = $criteria->isEmpty()
-            ? '- No acceptance criteria were provided.'
-            : $criteria
-                ->map(static function (array $criterion, int $index): string {
-                    $status = $criterion['checked'] ? '[x]' : '[ ]';
-
-                    return ($index + 1).". {$status} {$criterion['body']}";
-                })
-                ->join("\n");
-
         $workspacePath = $this->resolveWorkspacePath($run);
         $baseBranch = $run->base_branch ?: 'main';
 
@@ -424,9 +384,6 @@ Task {$task->id}: {$task->title}
 Description:
 {$task->description}
 
-Acceptance criteria:
-{$criteriaList}
-
 Project/workspace context:
 - Workspace path: {$workspacePath}
 - Base branch: {$baseBranch}
@@ -437,17 +394,6 @@ PROMPT;
 
     private function buildFixReviewPrompt(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): string
     {
-        $criteria = $this->acceptanceCriteria($task);
-        $criteriaList = $criteria->isEmpty()
-            ? '- No acceptance criteria were provided.'
-            : $criteria
-                ->map(static function (array $criterion, int $index): string {
-                    $status = $criterion['checked'] ? '[x]' : '[ ]';
-
-                    return ($index + 1).". {$status} {$criterion['body']}";
-                })
-                ->join("\n");
-
         $plan = trim((string) $run->plan);
         $planBlock = $plan !== '' ? $this->limitPromptText($plan, 8000) : 'No stored implementation plan was recorded.';
         $baseBranch = $run->base_branch ?: 'main';
@@ -458,9 +404,6 @@ Fix the review findings for task {$task->id}: {$task->title}
 
 Task description:
 {$task->description}
-
-Acceptance criteria:
-{$criteriaList}
 
 Stored implementation plan:
 {$planBlock}
@@ -500,20 +443,6 @@ PROMPT;
     }
 
     /**
-     * @return Collection<int, array{body: string, checked: bool}>
-     */
-    private function acceptanceCriteria(Task $task): Collection
-    {
-        return collect($task->acceptance_criteria ?? [])
-            ->map(static fn (array $criterion): array => [
-                'body' => trim((string) Arr::get($criterion, 'body', '')),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->filter(static fn (array $criterion): bool => $criterion['body'] !== '')
-            ->values();
-    }
-
-    /**
      * @param  array<int, array<string, mixed>>  $projectSummaries
      */
     public function analyzeInputSource(InputSource $inputSource, array $projectSummaries): CodingAgentResult
@@ -537,9 +466,6 @@ Return ONLY a valid JSON object with this exact shape:
       "assignee_github_username": null,
       "priority": "medium",
       "deadline": null,
-      "acceptance_criteria": [
-        {"body": "Specific verifiable criterion", "checked": false}
-      ],
       "questions": []
     }
   ]
@@ -551,7 +477,6 @@ Rules:
 - project_id can be null or an existing project id.
 - deadline must be YYYY-MM-DD or null.
 - assignee_github_username must omit @, or be null.
-- acceptance_criteria must contain concrete verification steps.
 - questions must contain unresolved product or technical questions.
 - If a project is obvious from context, use its id; otherwise leave project_id null.
 - Do not include markdown fences, commentary, or any text outside the JSON object.

@@ -8,7 +8,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Collection;
 
 #[Fillable([
     'task_id',
@@ -35,6 +34,7 @@ use Illuminate\Support\Collection;
     'review_reasoning_effort',
     'commit_message_model',
     'commit_message_reasoning_effort',
+    'retry_limit',
 ])]
 class TaskRun extends Model
 {
@@ -47,8 +47,6 @@ class TaskRun extends Model
     public const CHECKPOINT_SCREENSHOT_VERIFIED = 'screenshot_verified';
 
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
-
-    public const CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED = 'acceptance_criteria_verified';
 
     public const CHECKPOINT_CHANGES_COMMITTED = 'changes_committed';
 
@@ -92,6 +90,8 @@ class TaskRun extends Model
 
     public const STATUS_DONE = 'done';
 
+    public const STATUS_REJECTED = 'rejected';
+
     public const STATUS_FAILED = 'failed';
 
     public const ACTIVE_STATUSES = [
@@ -114,7 +114,6 @@ class TaskRun extends Model
         self::CHECKPOINT_IMPLEMENTATION_VERIFIED,
         self::CHECKPOINT_SCREENSHOT_VERIFIED,
         self::CHECKPOINT_CHANGES_REVIEWED,
-        self::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         self::CHECKPOINT_CHANGES_COMMITTED,
         self::CHECKPOINT_PULL_REQUEST_CREATED,
         self::CHECKPOINT_REVIEW_REQUESTED,
@@ -128,6 +127,7 @@ class TaskRun extends Model
     {
         return [
             'workflow_state' => 'array',
+            'retry_limit' => 'integer',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
         ];
@@ -212,17 +212,9 @@ class TaskRun extends Model
 
     public static function requestHashForTask(Task $task): string
     {
-        $criteria = Collection::make($task->acceptance_criteria ?? [])
-            ->map(fn (array $criterion): array => [
-                'body' => (string) Arr::get($criterion, 'body', ''),
-            ])
-            ->values()
-            ->all();
-
         return hash('sha256', json_encode([
             'title' => (string) $task->title,
             'description' => (string) $task->description,
-            'acceptance_criteria' => $criteria,
             'priority' => (string) $task->priority,
             'deadline' => $task->deadline?->toDateString(),
             'assignee_user_id' => $task->assignee_user_id,
@@ -233,18 +225,9 @@ class TaskRun extends Model
 
     private static function legacyRequestHashForTask(Task $task): string
     {
-        $criteria = Collection::make($task->acceptance_criteria ?? [])
-            ->map(fn (array $criterion): array => [
-                'body' => (string) Arr::get($criterion, 'body', ''),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->values()
-            ->all();
-
         return hash('sha256', json_encode([
             'title' => (string) $task->title,
             'description' => (string) $task->description,
-            'acceptance_criteria' => $criteria,
             'priority' => (string) $task->priority,
             'deadline' => $task->deadline?->toDateString(),
             'assignee_user_id' => $task->assignee_user_id,

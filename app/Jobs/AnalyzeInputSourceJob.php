@@ -67,7 +67,6 @@ class AnalyzeInputSourceJob implements ShouldQueue
                 foreach ($items as $item) {
                     $assignee = $this->resolveAssignee((string) Arr::get($item, 'assignee_github_username'));
                     $projectId = $this->resolveProjectId(Arr::get($item, 'project_id'), $validProjectIds);
-                    $criteria = $this->normalizeCriteria((array) Arr::get($item, 'acceptance_criteria', []));
                     $description = trim((string) Arr::get($item, 'description', ''));
                     $questions = $this->normalizeQuestions((array) Arr::get($item, 'questions', []));
 
@@ -99,7 +98,6 @@ class AnalyzeInputSourceJob implements ShouldQueue
                     Task::create([
                         'title' => (string) Arr::get($item, 'title', 'Unnamed task'),
                         'description' => $description,
-                        'acceptance_criteria' => $criteria,
                         'status' => Task::STATUS_PENDING_APPROVAL,
                         'priority' => $this->normalizePriority((string) Arr::get($item, 'priority')),
                         'deadline' => $this->normalizeDate((string) Arr::get($item, 'deadline')),
@@ -144,17 +142,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
     {
         return Collection::make($items)
             ->map(static function (array $item): array {
-                $task = Arr::except($item, ['questions']);
-                $task['acceptance_criteria'] = Collection::make((array) Arr::get($task, 'acceptance_criteria', []))
-                    ->filter(static fn (mixed $criterion): bool => is_array($criterion))
-                    ->map(static fn (array $criterion): array => [
-                        'scenario' => (string) Arr::get($criterion, 'body', Arr::get($criterion, 'scenario', '')),
-                        'checked' => (bool) Arr::get($criterion, 'checked', false),
-                    ])
-                    ->values()
-                    ->toArray();
-
-                return $task;
+                return Arr::except($item, ['questions']);
             })
             ->values()
             ->toArray();
@@ -215,23 +203,6 @@ class AnalyzeInputSourceJob implements ShouldQueue
                 ),
             ),
         );
-    }
-
-    /**
-     * @param  array<int, array<string, mixed>>  $criteria
-     * @return array<int, array{body: string, checked: bool}>
-     */
-    private function normalizeCriteria(array $criteria): array
-    {
-        return Collection::make($criteria)
-            ->filter(static fn (mixed $criterion) => is_array($criterion))
-            ->map(static fn (array $criterion): array => [
-                'body' => trim((string) Arr::get($criterion, 'body', '')),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->filter(static fn (array $criterion): bool => $criterion['body'] !== '')
-            ->values()
-            ->toArray();
     }
 
     private function normalizeDate(string $value): ?string

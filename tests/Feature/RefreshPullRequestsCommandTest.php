@@ -17,9 +17,6 @@ test('scheduled pull request refresh marks merged pull requests as done', functi
     $task = Task::create([
         'title' => 'Refresh scheduled PR',
         'description' => 'Scheduler refreshes the latest PR-bearing run.',
-        'acceptance_criteria' => [
-            ['body' => 'The pull request is refreshed.', 'checked' => false],
-        ],
         'status' => Task::STATUS_PR_CREATED,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -62,9 +59,6 @@ test('scheduled pull request refresh ignores tasks that are not waiting on pull 
     $task = Task::create([
         'title' => 'Already done PR',
         'description' => 'Done tasks should not keep refreshing.',
-        'acceptance_criteria' => [
-            ['body' => 'The pull request is already done.', 'checked' => false],
-        ],
         'status' => Task::STATUS_DONE,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);

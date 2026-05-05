@@ -60,9 +60,6 @@ test('it uses the agent analysis to create pending approval tasks', function () 
                             'assignee_github_username' => 'linh',
                             'priority' => 'high',
                             'deadline' => '2026-05-10',
-                            'acceptance_criteria' => [
-                                ['body' => 'Supported uploads are stored on the private disk.', 'checked' => false],
-                            ],
                             'questions' => [],
                         ],
                         [
@@ -72,9 +69,6 @@ test('it uses the agent analysis to create pending approval tasks', function () 
                             'assignee_github_username' => null,
                             'priority' => 'medium',
                             'deadline' => null,
-                            'acceptance_criteria' => [
-                                ['body' => 'Scanned PDFs upload successfully without extracted text.', 'checked' => false],
-                            ],
                             'questions' => ['Should OCR be added later?'],
                         ],
                     ],
@@ -93,13 +87,11 @@ test('it uses the agent analysis to create pending approval tasks', function () 
         ->and($source->analysis_result['task_count'])->toBe(2)
         ->and($source->analysis_result['tasks'][0]['title'])->toBe('Store uploaded input files')
         ->and($source->analysis_result['tasks'][0]['project_id'])->toBe($project->id)
-        ->and($source->analysis_result['tasks'][0]['acceptance_criteria'])->toBe([
-            ['scenario' => 'Supported uploads are stored on the private disk.', 'checked' => false],
-        ])
+        ->and($source->analysis_result['tasks'][0])->not->toHaveKey('acceptance_criteria')
         ->and($source->analysis_result['tasks'][1]['title'])->toBe('Analyze stored files')
         ->and($source->analysis_result['tasks'][1]['project_id'])->toBe(999999)
         ->and($source->analysis_result['tasks'][1])->not->toHaveKey('questions')
-        ->and($source->analysis_result['tasks'][1]['acceptance_criteria'][0])->not->toHaveKey('body')
+        ->and($source->analysis_result['tasks'][1])->not->toHaveKey('acceptance_criteria')
         ->and($source->analysis_result['analyzed_at'])->toBeString()
         ->and(Task::query()->count())->toBe(2);
 
@@ -111,10 +103,7 @@ test('it uses the agent analysis to create pending approval tasks', function () 
         ->deadline->toDateString()->toBe('2026-05-10')
         ->assignee_user_id->toBe($assignee->id)
         ->project_id->toBe($project->id)
-        ->source_input_id->toBe($source->id)
-        ->and($task->acceptance_criteria)->toBe([
-            ['body' => 'Supported uploads are stored on the private disk.', 'checked' => false],
-        ]);
+        ->source_input_id->toBe($source->id);
 
     $questionTask = Task::query()->where('title', 'Analyze stored files')->firstOrFail();
 

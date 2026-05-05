@@ -29,11 +29,6 @@ import profile from '@/routes/profile';
 import tasks from '@/routes/tasks';
 import type { Auth } from '@/types';
 
-type Criterion = {
-    body: string;
-    checked: boolean;
-};
-
 type User = {
     id: number;
     name: string;
@@ -133,7 +128,6 @@ type TaskRecord = {
     approved_by_user: TaskRelation | null;
     project?: TaskProject | null;
     source_input: SourceInput | null;
-    acceptance_criteria: Criterion[];
     created_at: string | null;
     updated_at: string | null;
     latest_task_run: {
@@ -196,10 +190,7 @@ type TaskFormData = {
     reviewer_user_id: string;
     project_id: string;
     source_input_id: string;
-    acceptance_criteria: Criterion[];
 };
-
-const emptyCriterion = (): Criterion => ({ body: '', checked: false });
 
 const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
 
@@ -242,16 +233,6 @@ const formatError = (error: string | string[] | undefined): string | null => {
     }
 
     return error ?? null;
-};
-
-const sanitizeCriteria = (criteria: Criterion[]): Criterion[] => {
-    const next = criteria
-        .map((item) => ({ ...item, body: item.body.trim() }))
-        .filter((item) => item.body !== '');
-
-    return next.length > 0
-        ? next
-        : [{ ...emptyCriterion(), body: 'No acceptance criteria provided.' }];
 };
 
 const setStatus = (value: boolean | undefined): string =>
@@ -315,7 +296,6 @@ export default function TasksIndex() {
         assignee_user_id: '',
         reviewer_user_id: '',
         source_input_id: '',
-        acceptance_criteria: [emptyCriterion()],
     });
 
     const editForm = useForm<TaskFormData>({
@@ -327,7 +307,6 @@ export default function TasksIndex() {
         assignee_user_id: '',
         reviewer_user_id: '',
         source_input_id: '',
-        acceptance_criteria: [emptyCriterion()],
     });
 
     const groupedTasks = useMemo(() => {
@@ -354,7 +333,6 @@ export default function TasksIndex() {
             assignee_user_id: '',
             reviewer_user_id: '',
             source_input_id: '',
-            acceptance_criteria: [emptyCriterion()],
         });
         createForm.clearErrors();
         createForm.setDefaults({
@@ -366,7 +344,6 @@ export default function TasksIndex() {
             assignee_user_id: '',
             reviewer_user_id: '',
             source_input_id: '',
-            acceptance_criteria: [emptyCriterion()],
         });
     };
 
@@ -408,10 +385,6 @@ export default function TasksIndex() {
             source_input_id: task.source_input_id
                 ? String(task.source_input_id)
                 : '',
-            acceptance_criteria:
-                task.acceptance_criteria.length > 0
-                    ? task.acceptance_criteria
-                    : [emptyCriterion()],
         });
         editForm.clearErrors();
         setShowEditModal(true);
@@ -424,57 +397,8 @@ export default function TasksIndex() {
         editForm.reset();
     };
 
-    const addCriterion = (
-        setter: (formData: TaskFormData) => void,
-        get: TaskFormData,
-    ) => {
-        setter({
-            ...get,
-            acceptance_criteria: [...get.acceptance_criteria, emptyCriterion()],
-        });
-    };
-
-    const removeCriterion = (
-        setter: (formData: TaskFormData) => void,
-        get: TaskFormData,
-        index: number,
-    ) => {
-        if (get.acceptance_criteria.length <= 1) {
-            setter({ ...get, acceptance_criteria: [emptyCriterion()] });
-
-            return;
-        }
-
-        const next = [...get.acceptance_criteria];
-        next.splice(index, 1);
-        setter({ ...get, acceptance_criteria: next });
-    };
-
-    const updateCriterion = (
-        setter: (formData: TaskFormData) => void,
-        get: TaskFormData,
-        index: number,
-        patch: Partial<Criterion>,
-    ) => {
-        const next = [...get.acceptance_criteria];
-        const criterion = next[index];
-
-        if (!criterion) {
-            return;
-        }
-
-        next[index] = { ...criterion, ...patch };
-        setter({ ...get, acceptance_criteria: next });
-    };
-
     const submitCreate = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        createForm.setData({
-            ...createForm.data,
-            acceptance_criteria: sanitizeCriteria(
-                createForm.data.acceptance_criteria,
-            ),
-        });
         createForm.post(tasks.store.url(), {
             onSuccess: () => {
                 setShowCreateModal(false);
@@ -490,12 +414,6 @@ export default function TasksIndex() {
             return;
         }
 
-        editForm.setData({
-            ...editForm.data,
-            acceptance_criteria: sanitizeCriteria(
-                editForm.data.acceptance_criteria,
-            ),
-        });
         editForm.patch(tasks.update.url(editingTask.id), {
             onSuccess: closeEditModal,
         });
@@ -706,24 +624,6 @@ export default function TasksIndex() {
                     projects={projectOptions}
                     priorities={priorities}
                     showSourceInput={false}
-                    onAddCriterion={() =>
-                        addCriterion(createForm.setData, createForm.data)
-                    }
-                    onRemoveCriterion={(index) =>
-                        removeCriterion(
-                            createForm.setData,
-                            createForm.data,
-                            index,
-                        )
-                    }
-                    onUpdateCriterion={(index, patch) =>
-                        updateCriterion(
-                            createForm.setData,
-                            createForm.data,
-                            index,
-                            patch,
-                        )
-                    }
                 />
             </TaskEditorModal>
 
@@ -742,20 +642,6 @@ export default function TasksIndex() {
                     sourceInputs={sourceInputs}
                     projects={projectOptions}
                     priorities={priorities}
-                    onAddCriterion={() =>
-                        addCriterion(editForm.setData, editForm.data)
-                    }
-                    onRemoveCriterion={(index) =>
-                        removeCriterion(editForm.setData, editForm.data, index)
-                    }
-                    onUpdateCriterion={(index, patch) =>
-                        updateCriterion(
-                            editForm.setData,
-                            editForm.data,
-                            index,
-                            patch,
-                        )
-                    }
                 />
             </TaskEditorModal>
 
@@ -1169,37 +1055,6 @@ function TaskDetails({
             <Panel className="p-4">
                 <div className="mb-3 flex items-center justify-between">
                     <h3 className="text-sm font-semibold text-ink">
-                        Acceptance criteria
-                    </h3>
-                    <span className="text-xs text-ink-subtle">
-                        {task.acceptance_criteria.length} items
-                    </span>
-                </div>
-                <ul className="space-y-2">
-                    {task.acceptance_criteria.map((criterion, index) => (
-                        <li
-                            key={`${task.id}-${index}`}
-                            className="flex gap-3 rounded-md border border-hairline bg-surface-2 p-3 text-sm text-ink-muted"
-                        >
-                            <span
-                                className={cn(
-                                    'mt-0.5 grid size-4 shrink-0 place-items-center rounded-sm border text-[10px] font-bold',
-                                    criterion.checked
-                                        ? 'border-success bg-success text-white'
-                                        : 'border-hairline-strong text-transparent',
-                                )}
-                            >
-                                ✓
-                            </span>
-                            <span>{criterion.body}</span>
-                        </li>
-                    ))}
-                </ul>
-            </Panel>
-
-            <Panel className="p-4">
-                <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-ink">
                         Task runs
                     </h3>
                     <span className="text-xs text-ink-subtle">
@@ -1495,9 +1350,6 @@ function TaskFormFields({
     projects,
     priorities,
     showSourceInput = true,
-    onAddCriterion,
-    onRemoveCriterion,
-    onUpdateCriterion,
 }: {
     form: {
         data: TaskFormData;
@@ -1512,9 +1364,6 @@ function TaskFormFields({
     projects: ProjectSummary[];
     priorities: string[];
     showSourceInput?: boolean;
-    onAddCriterion: () => void;
-    onRemoveCriterion: (index: number) => void;
-    onUpdateCriterion: (index: number, patch: Partial<Criterion>) => void;
 }) {
     const changeProject = (projectId: string) => {
         const currentProjectDefaultReviewer = defaultReviewerForProject(
@@ -1668,65 +1517,6 @@ function TaskFormFields({
                 </Field>
             ) : null}
 
-            <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-ink-muted">
-                        Acceptance criteria
-                    </span>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        className="min-h-8 px-2 py-1 text-xs"
-                        onClick={onAddCriterion}
-                    >
-                        Add
-                    </Button>
-                </div>
-                {form.data.acceptance_criteria.map((criterion, index) => (
-                    <div
-                        key={`${index}-${criterion.checked}`}
-                        className="grid gap-2 rounded-md border border-hairline bg-surface-2 p-2"
-                    >
-                        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                            <Input
-                                type="text"
-                                value={criterion.body}
-                                onChange={(event) =>
-                                    onUpdateCriterion(index, {
-                                        body: event.target.value,
-                                    })
-                                }
-                                placeholder="Acceptance criteria item"
-                            />
-                            <label className="flex min-h-9 items-center gap-2 text-sm text-ink-muted">
-                                <input
-                                    type="checkbox"
-                                    checked={criterion.checked}
-                                    onChange={(event) =>
-                                        onUpdateCriterion(index, {
-                                            checked: event.target.checked,
-                                        })
-                                    }
-                                />
-                                Done
-                            </label>
-                        </div>
-                        <Button
-                            type="button"
-                            variant="danger"
-                            className="min-h-8 justify-self-end px-2 py-1 text-xs"
-                            onClick={() => onRemoveCriterion(index)}
-                        >
-                            Remove
-                        </Button>
-                    </div>
-                ))}
-                {formatError(form.errors.acceptance_criteria) ? (
-                    <p className="text-xs text-red-200">
-                        {formatError(form.errors.acceptance_criteria)}
-                    </p>
-                ) : null}
-            </div>
         </div>
     );
 }

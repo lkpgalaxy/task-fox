@@ -76,7 +76,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
                     TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED => $this->verifyScreenshot($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run, $repositoryPath),
-                    TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED => $this->verifyAcceptanceCriteria($task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     TaskRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
                     TaskRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
@@ -189,9 +188,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         TaskRun $run,
         string $repositoryPath,
     ): void {
-        $maxAttempts = max(1, (int) config('automation.agent.retry_limit', 3));
+        $retryLimit = $this->retryLimit($run);
 
-        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
             $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
             $run->update([
                 'status' => TaskRun::STATUS_IMPLEMENTING,
@@ -216,7 +215,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 return;
             }
 
-            if ($attempt >= $maxAttempts) {
+            if (! $this->allowsRetry($attempt, $retryLimit)) {
                 $testFailure = trim((string) $run->refresh()->last_error);
 
                 throw new Exception($testFailure !== ''
@@ -226,7 +225,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
             $this->log($run, 'warning', 'Tests failed; retrying', [
                 'attempt' => $attempt,
-                'max_attempts' => $maxAttempts,
+                'max_attempts' => $this->retryLimitLabel($retryLimit),
             ]);
 
             if ($task->externalTaskLink) {
@@ -238,20 +237,11 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     'sent_at' => now(),
                 ]);
 
-                $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed tests; retrying ({$attempt}/{$maxAttempts}).");
+                $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed tests; retrying ({$attempt}/{$this->retryLimitLabel($retryLimit)}).");
             }
 
             $run->update(['status' => TaskRun::STATUS_PLANNING]);
         }
-    }
-
-    private function verifyAcceptanceCriteria(Task $task, TaskRun $run): void
-    {
-        $run->markCheckpointRunning(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED);
-
-        $this->markAcceptanceCriteriaVerified($task, $run);
-
-        $run->markCheckpointCompleted(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED);
     }
 
     private function verifyScreenshot(CodingAgent $codingAgent, Task $task, TaskRun $run): void
@@ -444,39 +434,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return Str::substr($output, 0, $limit)."\n\n[truncated]";
     }
 
-    private function markAcceptanceCriteriaVerified(Task $task, TaskRun $run): void
-    {
-        $criteria = collect($task->refresh()->acceptance_criteria ?? [])
-            ->map(fn (array $criterion): array => [
-                'body' => (string) Arr::get($criterion, 'body', ''),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->filter(fn (array $criterion): bool => $criterion['body'] !== '')
-            ->values();
-
-        $uncheckedCount = $criteria
-            ->filter(fn (array $criterion): bool => ! $criterion['checked'])
-            ->count();
-
-        if ($criteria->isEmpty()) {
-            throw new Exception('Acceptance criteria are required before implementation.');
-        }
-
-        $task->forceFill([
-            'acceptance_criteria' => $criteria
-                ->map(fn (array $criterion): array => [
-                    'body' => $criterion['body'],
-                    'checked' => true,
-                ])
-                ->all(),
-        ])->save();
-
-        $this->log($run, 'info', 'Acceptance criteria verified', [
-            'verified_count' => $criteria->count(),
-            'newly_verified_count' => $uncheckedCount,
-        ]);
-    }
-
     private function screenshotPath(TaskRun $run): string
     {
         return storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
@@ -484,9 +441,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run, string $repositoryPath): void
     {
-        $maxReviewAttempts = max(1, (int) config('automation.agent.retry_limit', 3));
+        $retryLimit = $this->retryLimit($run);
 
-        for ($attempt = 1; $attempt <= $maxReviewAttempts; $attempt++) {
+        for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
             $run->markCheckpointRunning(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
             $run->update([
                 'status' => TaskRun::STATUS_REVIEWING_CHANGES,
@@ -511,9 +468,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 return;
             }
 
-            if ($attempt >= $maxReviewAttempts) {
+            if (! $this->allowsRetry($attempt, $retryLimit)) {
                 $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
-                    'max_attempts' => $maxReviewAttempts,
+                    'max_attempts' => $this->retryLimitLabel($retryLimit),
                     'error' => $agentResult->error,
                 ]);
 
@@ -526,7 +483,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
             $this->log($run, 'warning', 'Coding agent review failed', [
                 'attempt' => $attempt,
-                'max_attempts' => $maxReviewAttempts,
+                'max_attempts' => $this->retryLimitLabel($retryLimit),
                 'error' => $agentResult->error,
             ]);
 
@@ -552,6 +509,28 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+    }
+
+    private function retryLimit(TaskRun $run): int
+    {
+        $retryLimit = $run->retry_limit ?? (int) config('automation.agent.retry_limit', 3);
+
+        return $retryLimit === -1 || $retryLimit > 0 ? $retryLimit : 1;
+    }
+
+    private function allowsAttempt(int $attempt, int $retryLimit): bool
+    {
+        return $retryLimit === -1 || $attempt <= $retryLimit;
+    }
+
+    private function allowsRetry(int $attempt, int $retryLimit): bool
+    {
+        return $retryLimit === -1 || $attempt < $retryLimit;
+    }
+
+    private function retryLimitLabel(int $retryLimit): int|string
+    {
+        return $retryLimit === -1 ? 'unlimited' : $retryLimit;
     }
 
     private function commitChanges(

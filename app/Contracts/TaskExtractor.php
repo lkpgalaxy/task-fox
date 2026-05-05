@@ -14,7 +14,6 @@ interface TaskExtractor
      *     project_id: int|null,
      *     priority: string|null,
      *     deadline: string|null,
-     *     acceptance_criteria: array<int, array{body: string, checked: bool}>,
      *     questions: array<int, string>,
      * }>
      */

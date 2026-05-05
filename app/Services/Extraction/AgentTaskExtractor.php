@@ -23,7 +23,6 @@ class AgentTaskExtractor implements TaskExtractor
      *     assignee_github_username: string|null,
      *     priority: string|null,
      *     deadline: string|null,
-     *     acceptance_criteria: array<int, array{body: string, checked: bool}>,
      *     questions: array<int, string>,
      * }>
      */
@@ -68,7 +67,6 @@ class AgentTaskExtractor implements TaskExtractor
      *     assignee_github_username: string|null,
      *     priority: string|null,
      *     deadline: string|null,
-     *     acceptance_criteria: array<int, array{body: string, checked: bool}>,
      *     questions: array<int, string>,
      * }
      */
@@ -81,7 +79,6 @@ class AgentTaskExtractor implements TaskExtractor
             'assignee_github_username' => $this->normalizeAssignee(Arr::get($task, 'assignee_github_username')),
             'priority' => $this->normalizePriority(Arr::get($task, 'priority')),
             'deadline' => $this->normalizeDeadline(Arr::get($task, 'deadline')),
-            'acceptance_criteria' => $this->normalizeCriteria((array) Arr::get($task, 'acceptance_criteria', [])),
             'questions' => $this->normalizeQuestions((array) Arr::get($task, 'questions', [])),
         ];
     }
@@ -135,32 +132,6 @@ class AgentTaskExtractor implements TaskExtractor
         }
 
         return $deadline;
-    }
-
-    /**
-     * @param  array<int, mixed>  $criteria
-     * @return array<int, array{body: string, checked: bool}>
-     */
-    private function normalizeCriteria(array $criteria): array
-    {
-        $normalized = Collection::make($criteria)
-            ->filter(static fn (mixed $criterion): bool => is_array($criterion))
-            ->map(static fn (array $criterion): array => [
-                'body' => self::stringFromMixed(Arr::get($criterion, 'body', '')),
-                'checked' => (bool) Arr::get($criterion, 'checked', false),
-            ])
-            ->filter(static fn (array $criterion): bool => $criterion['body'] !== '')
-            ->values()
-            ->toArray();
-
-        if ($normalized !== []) {
-            return $normalized;
-        }
-
-        return [
-            ['body' => 'Implement and verify end-to-end behavior', 'checked' => false],
-            ['body' => 'Add/update tests and ensure they pass', 'checked' => false],
-        ];
     }
 
     /**

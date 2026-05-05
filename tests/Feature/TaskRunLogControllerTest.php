@@ -20,9 +20,6 @@ test('logs page includes task run logs on initial load', function () {
     $task = Task::create([
         'title' => 'Logged task',
         'description' => 'This task has logs.',
-        'acceptance_criteria' => [
-            ['body' => 'Logs render on the logs page.', 'checked' => false],
-        ],
         'status' => Task::STATUS_RUNNING,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
@@ -65,9 +62,6 @@ test('logs partial reload refreshes only log records', function () {
     $task = Task::create([
         'title' => 'Polling logs task',
         'description' => 'The logs page polls for fresh records.',
-        'acceptance_criteria' => [
-            ['body' => 'Fresh logs appear without unrelated props.', 'checked' => false],
-        ],
         'status' => Task::STATUS_RUNNING,
         'priority' => Task::PRIORITY_MEDIUM,
     ]);
