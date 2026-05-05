@@ -184,12 +184,14 @@ export function Modal({
     title,
     children,
     size = 'lg',
+    closeButton = 'text',
 }: {
     show: boolean;
     onClose: () => void;
     title: string;
     children: ReactNode;
     size?: 'md' | 'lg' | 'xl';
+    closeButton?: 'text' | 'icon';
 }) {
     if (!show) {
         return null;
@@ -214,9 +216,21 @@ export function Modal({
                     <h2 className="truncate text-base font-semibold text-ink">
                         {title}
                     </h2>
-                    <Button type="button" variant="ghost" onClick={onClose}>
-                        Close
-                    </Button>
+                    {closeButton === 'icon' ? (
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            aria-label="Close"
+                            onClick={onClose}
+                            className="size-8 min-h-8 px-0 py-0 text-lg leading-none"
+                        >
+                            &times;
+                        </Button>
+                    ) : (
+                        <Button type="button" variant="ghost" onClick={onClose}>
+                            Close
+                        </Button>
+                    )}
                 </div>
                 <div className="max-h-[calc(90vh-73px)] overflow-y-auto p-5">
                     {children}

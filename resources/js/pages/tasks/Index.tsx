@@ -15,7 +15,16 @@ import {
     Textarea,
 } from '@/components/ui';
 import { UploadSourceAction } from '@/components/upload-source-modal';
+import {
+    checkpointLabel,
+    completedWorkflowCheckpointCount,
+    shortWorkflowHash,
+    WorkflowTimeline,
+    workflowCurrentCheckpoint,
+} from '@/components/workflow-timeline';
+import type { WorkflowCheckpoint } from '@/components/workflow-timeline';
 import { cn } from '@/lib/utils';
+import inputSources from '@/routes/input-sources';
 import profile from '@/routes/profile';
 import tasks from '@/routes/tasks';
 import type { Auth } from '@/types';
@@ -56,15 +65,6 @@ type RunLog = {
     created_at: string | null;
 };
 
-type WorkflowCheckpoint = {
-    name: string;
-    status: string;
-    attempts: number;
-    completed_at: string | null;
-    failed_at: string | null;
-    error: string | null;
-};
-
 type WorkflowState = {
     request_hash?: string;
     checkpoints?: WorkflowCheckpoint[];
@@ -87,6 +87,22 @@ type AiRunRecord = {
     logs: RunLog[];
 };
 
+type TaskProject = {
+    id: number;
+    name: string;
+    workspace_path: string;
+    url: string | null;
+    database_name?: string | null;
+    database_username?: string | null;
+    base_branch?: string | null;
+    default_reviewer_user_id: number | null;
+    default_reviewer?: User | null;
+    has_database_password?: boolean;
+    has_credential_password?: boolean;
+    has_credential_username?: boolean;
+    has_database_username?: boolean;
+};
+
 type TaskRecord = {
     id: number;
     title: string;
@@ -106,13 +122,7 @@ type TaskRecord = {
     assignee: TaskRelation | null;
     reviewer: TaskRelation | null;
     approved_by_user: TaskRelation | null;
-    project?: {
-        id: number;
-        name: string;
-        workspace_path: string;
-        url: string | null;
-        default_reviewer_user_id: number | null;
-    } | null;
+    project?: TaskProject | null;
     source_input: SourceInput | null;
     acceptance_criteria: Criterion[];
     created_at: string | null;
@@ -176,12 +186,6 @@ const emptyCriterion = (): Criterion => ({ body: '', checked: false });
 
 const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
 
-const checkpointLabel = (name: string) =>
-    name
-        .split('_')
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' ');
-
 const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
 const projectRequiredMessage = 'Assign a project before approving this task.';
@@ -215,6 +219,9 @@ const formatDate = (value: string | null): string => {
         return value;
     }
 };
+
+const setStatus = (value: boolean | undefined): string =>
+    value ? 'set' : 'not set';
 
 const defaultReviewerForProject = (
     projects: ProjectSummary[],
@@ -814,6 +821,17 @@ function TaskDetails({
     const aiRuns = [...(task.ai_runs ?? [])].sort((first, second) => {
         return second.id - first.id;
     });
+    const latestRun = aiRuns[0] ?? null;
+    const latestWorkflow = latestRun?.workflow_state ?? null;
+    const latestCheckpoints = latestWorkflow?.checkpoints ?? [];
+    const currentCheckpoint = workflowCurrentCheckpoint(latestCheckpoints);
+    const completedCheckpoints =
+        completedWorkflowCheckpointCount(latestCheckpoints);
+    const failedCheckpoint =
+        latestCheckpoints.find(
+            (checkpoint) => checkpoint.status === 'failed',
+        ) ?? null;
+    const [showProjectModal, setShowProjectModal] = useState(false);
 
     return (
         <div className="space-y-5">
@@ -923,10 +941,37 @@ function TaskDetails({
                     {task.approved_by_user?.name ?? 'Not approved'}
                 </DetailItem>
                 <DetailItem label="Source input">
-                    {task.source_input?.title ?? 'None'}
+                    {task.source_input ? (
+                        task.source_input.has_file ? (
+                            <ActionLink
+                                href={inputSources.preview.url(
+                                    task.source_input.id,
+                                )}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="min-h-0 px-2 py-1 text-xs"
+                            >
+                                {task.source_input.title}
+                            </ActionLink>
+                        ) : (
+                            task.source_input.title
+                        )
+                    ) : (
+                        'None'
+                    )}
                 </DetailItem>
                 <DetailItem label="Project">
-                    {task.project?.name ?? 'Unassigned'}
+                    {task.project ? (
+                        <button
+                            type="button"
+                            onClick={() => setShowProjectModal(true)}
+                            className="inline-flex min-h-0 items-center rounded-md border border-hairline-strong bg-surface-2 px-2 py-1 text-xs font-medium text-ink transition hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-focus"
+                        >
+                            {task.project.name}
+                        </button>
+                    ) : (
+                        'Unassigned'
+                    )}
                 </DetailItem>
                 <DetailItem label="Latest PR">
                     {task.pull_request_url ? (
@@ -949,6 +994,62 @@ function TaskDetails({
                     {formatDate(task.updated_at)}
                 </DetailItem>
             </div>
+
+            <TaskProjectModal
+                project={task.project ?? null}
+                show={showProjectModal}
+                onClose={() => setShowProjectModal(false)}
+            />
+
+            <Panel className="p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-ink">
+                        Workflow state
+                    </h3>
+                    {latestRun ? (
+                        <Badge value={latestRun.status}>
+                            Run #{latestRun.id}{' '}
+                            {taskStatusLabel(latestRun.status)}
+                        </Badge>
+                    ) : null}
+                </div>
+                {latestRun && latestWorkflow ? (
+                    <div className="space-y-3">
+                        <div className="grid gap-3 sm:grid-cols-3">
+                            <DetailItem label="Current checkpoint">
+                                {currentCheckpoint
+                                    ? checkpointLabel(currentCheckpoint.name)
+                                    : 'Complete'}
+                            </DetailItem>
+                            <DetailItem label="Progress">
+                                {completedCheckpoints}/
+                                {latestCheckpoints.length} checkpoints
+                            </DetailItem>
+                            <DetailItem label="Request hash">
+                                <span className="font-mono">
+                                    {shortWorkflowHash(
+                                        latestWorkflow.request_hash,
+                                    )}
+                                </span>
+                            </DetailItem>
+                        </div>
+                        {failedCheckpoint?.error ? (
+                            <p className="rounded-md border border-danger/30 bg-danger/10 p-2 text-xs text-red-100">
+                                {checkpointLabel(failedCheckpoint.name)} failed:{' '}
+                                {failedCheckpoint.error}
+                            </p>
+                        ) : null}
+                        <WorkflowTimeline
+                            checkpoints={latestCheckpoints}
+                            formatDate={formatDate}
+                        />
+                    </div>
+                ) : (
+                    <p className="text-sm text-ink-subtle">
+                        No workflow state has been recorded yet.
+                    </p>
+                )}
+            </Panel>
 
             <Panel className="p-4">
                 <div className="mb-3 flex items-center justify-between">
@@ -1017,41 +1118,15 @@ function TaskDetails({
                                         Reviews: {run.review_attempt_count}
                                     </span>
                                 </div>
-                                {run.workflow_state?.checkpoints?.length ? (
-                                    <div className="mt-3 grid gap-2">
-                                        {run.workflow_state.checkpoints.map(
-                                            (checkpoint) => (
-                                                <div
-                                                    key={`${run.id}-${checkpoint.name}`}
-                                                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-hairline bg-surface-1 px-2 py-1.5 text-xs"
-                                                >
-                                                    <span className="text-ink-muted">
-                                                        {checkpointLabel(
-                                                            checkpoint.name,
-                                                        )}
-                                                    </span>
-                                                    <span className="flex items-center gap-2">
-                                                        <Badge
-                                                            value={
-                                                                checkpoint.status
-                                                            }
-                                                        >
-                                                            {
-                                                                checkpoint.status
-                                                            }
-                                                        </Badge>
-                                                        <span className="text-ink-subtle">
-                                                            {
-                                                                checkpoint.attempts
-                                                            }{' '}
-                                                            attempts
-                                                        </span>
-                                                    </span>
-                                                </div>
-                                            ),
-                                        )}
-                                    </div>
-                                ) : null}
+                                <div className="mt-3">
+                                    <WorkflowTimeline
+                                        checkpoints={
+                                            run.workflow_state?.checkpoints ??
+                                            []
+                                        }
+                                        formatDate={formatDate}
+                                    />
+                                </div>
                                 {run.pull_request_url ? (
                                     <p className="mt-2 truncate text-xs text-ink-subtle">
                                         PR:{' '}
@@ -1101,6 +1176,78 @@ function TaskDetails({
                 )}
             </Panel>
         </div>
+    );
+}
+
+function TaskProjectModal({
+    project,
+    show,
+    onClose,
+}: {
+    project: TaskProject | null;
+    show: boolean;
+    onClose: () => void;
+}) {
+    if (!show || project === null) {
+        return null;
+    }
+
+    return (
+        <Modal
+            show
+            onClose={onClose}
+            title={project.name}
+            size="md"
+            closeButton="icon"
+        >
+            <div className="space-y-4">
+                <p className="font-mono text-xs break-all text-ink-muted">
+                    {project.workspace_path}
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                    <ProjectDetailItem label="Repository URL">
+                        {project.url ? (
+                            <a
+                                href={project.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="break-all text-primary hover:text-primary-hover"
+                            >
+                                {project.url}
+                            </a>
+                        ) : (
+                            'n/a'
+                        )}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Base branch">
+                        <Badge>{project.base_branch ?? 'main'}</Badge>
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database name">
+                        {project.database_name ?? 'n/a'}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database username">
+                        {project.database_username ?? 'n/a'}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database password">
+                        {setStatus(project.has_database_password)}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Credential username">
+                        {setStatus(project.has_credential_username)}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Credential password">
+                        {setStatus(project.has_credential_password)}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Default reviewer">
+                        {project.default_reviewer
+                            ? project.default_reviewer.github_username
+                                ? `${project.default_reviewer.name} (@${project.default_reviewer.github_username})`
+                                : project.default_reviewer.name
+                            : 'n/a'}
+                    </ProjectDetailItem>
+                </div>
+            </div>
+        </Modal>
     );
 }
 
@@ -1400,6 +1547,21 @@ function DetailItem({
             <div className="mt-1 min-w-0 truncate text-sm font-medium text-ink-muted">
                 {children}
             </div>
+        </div>
+    );
+}
+
+function ProjectDetailItem({
+    label,
+    children,
+}: {
+    label: string;
+    children: ReactNode;
+}) {
+    return (
+        <div className="rounded-md border border-hairline bg-surface-2 p-3">
+            <p className="text-xs font-medium text-ink-tertiary">{label}</p>
+            <div className="mt-1 text-sm text-ink">{children}</div>
         </div>
     );
 }

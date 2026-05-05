@@ -57,6 +57,7 @@ type ProjectFormData = {
 type PageProps = {
     projects: ProjectRecord[];
     reviewerOptions: ReviewerOption[];
+    selectedProject: ProjectRecord | null;
     errors?: {
         [key: string]: string | string[] | undefined;
     };
@@ -89,6 +90,7 @@ export default function ProjectsIndex() {
     const {
         projects: projectRows,
         reviewerOptions,
+        selectedProject,
         errors,
     } = usePage<PageProps>().props;
     const [showCreateModal, setShowCreateModal] = useState(false);
@@ -175,6 +177,12 @@ export default function ProjectsIndex() {
                     closeEditModal();
                 }
             },
+        });
+    };
+
+    const closeDetailModal = () => {
+        router.visit(projects.index.url(), {
+            preserveScroll: true,
         });
     };
 
@@ -345,7 +353,80 @@ export default function ProjectsIndex() {
                 onClose={closeEditModal}
                 onSubmit={submitEdit}
             />
+
+            <ProjectDetailModal
+                project={selectedProject}
+                onClose={closeDetailModal}
+            />
         </AppShell>
+    );
+}
+
+function ProjectDetailModal({
+    project,
+    onClose,
+}: {
+    project: ProjectRecord | null;
+    onClose: () => void;
+}) {
+    if (project === null) {
+        return null;
+    }
+
+    return (
+        <Modal
+            show
+            onClose={onClose}
+            title={project.name}
+            size="md"
+            closeButton="icon"
+        >
+            <div className="space-y-4">
+                <p className="font-mono text-xs break-all text-ink-muted">
+                    {project.workspace_path}
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                    <ProjectDetailItem label="Repository URL">
+                        {project.url ? (
+                            <a
+                                href={project.url}
+                                className="break-all text-primary hover:text-primary-hover"
+                            >
+                                {project.url}
+                            </a>
+                        ) : (
+                            'n/a'
+                        )}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Base branch">
+                        <Badge>{project.base_branch ?? 'main'}</Badge>
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database name">
+                        {project.database_name ?? 'n/a'}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database username">
+                        {project.database_username ?? 'n/a'}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Database password">
+                        {yesNo(project.has_database_password)}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Credential username">
+                        {project.has_credential_username ? 'set' : 'not set'}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Credential password">
+                        {yesNo(project.has_credential_password)}
+                    </ProjectDetailItem>
+                    <ProjectDetailItem label="Default reviewer">
+                        {project.default_reviewer
+                            ? project.default_reviewer.github_username
+                                ? `${project.default_reviewer.name} (@${project.default_reviewer.github_username})`
+                                : project.default_reviewer.name
+                            : 'n/a'}
+                    </ProjectDetailItem>
+                </div>
+            </div>
+        </Modal>
     );
 }
 
@@ -572,5 +653,20 @@ function MetaLine({ label, value }: { label: string; value: ReactNode }) {
             <span className="text-ink-tertiary">{label}: </span>
             {value}
         </p>
+    );
+}
+
+function ProjectDetailItem({
+    label,
+    children,
+}: {
+    label: string;
+    children: ReactNode;
+}) {
+    return (
+        <div className="rounded-md border border-hairline bg-surface-2 p-3">
+            <p className="text-xs font-medium text-ink-tertiary">{label}</p>
+            <div className="mt-1 text-sm text-ink">{children}</div>
+        </div>
     );
 }

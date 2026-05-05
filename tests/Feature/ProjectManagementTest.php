@@ -125,6 +125,60 @@ test('project index lists users without github usernames as reviewer options', f
             )));
 });
 
+test('project index selects a project from the project query parameter', function () {
+    $this->withoutVite();
+
+    $reviewer = User::factory()->create([
+        'name' => 'Reviewer One',
+        'github_username' => 'reviewer-one',
+    ]);
+    $project = Project::create([
+        'name' => 'Core Platform',
+        'workspace_path' => '/tmp/core-platform',
+        'url' => 'https://github.com/example/core-platform',
+        'database_name' => 'core_db',
+        'database_username' => 'core_user',
+        'database_password' => 'secret',
+        'credential_username' => 'repo_user',
+        'credential_password' => 'repo_secret',
+        'base_branch' => 'develop',
+        'default_reviewer_user_id' => $reviewer->id,
+    ]);
+
+    $this->get(route('projects.index', ['project' => $project->id]))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('projects/Index')
+            ->where('selectedProject.id', $project->id)
+            ->where('selectedProject.name', 'Core Platform')
+            ->where('selectedProject.workspace_path', '/tmp/core-platform')
+            ->where('selectedProject.url', 'https://github.com/example/core-platform')
+            ->where('selectedProject.database_name', 'core_db')
+            ->where('selectedProject.database_username', 'core_user')
+            ->where('selectedProject.has_database_password', true)
+            ->where('selectedProject.has_credential_username', true)
+            ->where('selectedProject.has_credential_password', true)
+            ->where('selectedProject.base_branch', 'develop')
+            ->where('selectedProject.default_reviewer.id', $reviewer->id)
+        );
+});
+
+test('project index returns no selected project for an invalid project query parameter', function () {
+    $this->withoutVite();
+
+    Project::create([
+        'name' => 'Core Platform',
+        'workspace_path' => '/tmp/core-platform',
+    ]);
+
+    $this->get(route('projects.index', ['project' => 999]))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('projects/Index')
+            ->where('selectedProject', null)
+        );
+});
+
 test('projects can use a default reviewer without a github username', function () {
     $reviewer = User::factory()->create(['github_username' => null]);
 

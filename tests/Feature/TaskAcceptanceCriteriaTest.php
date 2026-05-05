@@ -612,6 +612,69 @@ test('task index can select a pending approval task without external messages', 
         );
 });
 
+test('selected task includes source input preview metadata', function () {
+    $this->withoutVite();
+
+    $source = InputSource::create([
+        'title' => 'Planning notes',
+        'filename' => 'planning-notes.txt',
+        'file_disk' => 'local',
+        'file_path' => 'input-sources/planning-notes.txt',
+        'mime_type' => 'text/plain',
+        'file_size' => 128,
+        'analysis_status' => 'completed',
+    ]);
+    $reviewer = User::factory()->create([
+        'name' => 'Project Reviewer',
+        'github_username' => 'project-reviewer',
+    ]);
+    $project = Project::create([
+        'name' => 'Task Fox',
+        'workspace_path' => '/tmp/task-fox',
+        'url' => 'https://github.com/example/task-fox',
+        'database_name' => 'task_fox',
+        'database_username' => 'task_fox_user',
+        'database_password' => 'secret',
+        'credential_username' => 'repo_user',
+        'credential_password' => 'repo_secret',
+        'base_branch' => 'develop',
+        'default_reviewer_user_id' => $reviewer->id,
+    ]);
+    $task = Task::create([
+        'title' => 'Build source links',
+        'description' => 'Expose preview metadata to the task detail modal.',
+        'acceptance_criteria' => [
+            ['body' => 'The source preview link is available.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_PENDING_APPROVAL,
+        'priority' => Task::PRIORITY_MEDIUM,
+        'source_input_id' => $source->id,
+        'project_id' => $project->id,
+    ]);
+
+    $this->get(route('tasks.index', ['task' => $task->id]))
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->component('tasks/Index')
+            ->where('selectedTask.id', $task->id)
+            ->where('selectedTask.source_input.id', $source->id)
+            ->where('selectedTask.source_input.title', 'Planning notes')
+            ->where('selectedTask.source_input.filename', 'planning-notes.txt')
+            ->where('selectedTask.source_input.mime_type', 'text/plain')
+            ->where('selectedTask.source_input.file_size', 128)
+            ->where('selectedTask.source_input.has_file', true)
+            ->where('selectedTask.project.id', $project->id)
+            ->where('selectedTask.project.name', 'Task Fox')
+            ->where('selectedTask.project.database_name', 'task_fox')
+            ->where('selectedTask.project.database_username', 'task_fox_user')
+            ->where('selectedTask.project.has_database_password', true)
+            ->where('selectedTask.project.has_credential_username', true)
+            ->where('selectedTask.project.has_credential_password', true)
+            ->where('selectedTask.project.base_branch', 'develop')
+            ->where('selectedTask.project.default_reviewer.id', $reviewer->id)
+        );
+});
+
 test('pending approval task can be approved from the task board', function () {
     Queue::fake();
     $actor = auth()->user();
