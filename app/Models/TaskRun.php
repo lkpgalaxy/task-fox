@@ -29,6 +29,8 @@ class TaskRun extends Model
 {
     public const CHECKPOINT_REPOSITORY_PREPARED = 'repository_prepared';
 
+    public const CHECKPOINT_PLANNED = 'planned';
+
     public const CHECKPOINT_IMPLEMENTATION_VERIFIED = 'implementation_verified';
 
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
@@ -90,6 +92,7 @@ class TaskRun extends Model
 
     public const WORKFLOW_CHECKPOINTS = [
         self::CHECKPOINT_REPOSITORY_PREPARED,
+        self::CHECKPOINT_PLANNED,
         self::CHECKPOINT_IMPLEMENTATION_VERIFIED,
         self::CHECKPOINT_CHANGES_REVIEWED,
         self::CHECKPOINT_CHANGES_COMMITTED,

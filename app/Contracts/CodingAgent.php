@@ -8,6 +8,8 @@ use App\Models\TaskRun;
 
 interface CodingAgent extends Agent
 {
+    public function plan(Task $task, TaskRun $run): CodingAgentResult;
+
     public function run(Task $task, TaskRun $run): CodingAgentResult;
 
     public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult;

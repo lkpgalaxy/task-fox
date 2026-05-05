@@ -475,6 +475,7 @@ test('codex agent prompt renders acceptance criteria from the task json column',
         'task_id' => $task->id,
         'status' => TaskRun::STATUS_IMPLEMENTING,
         'branch_name' => 'task/test',
+        'plan' => 'Use the stored acceptance criterion.',
     ]);
     $binPath = sys_get_temp_dir().'/task-fox-codex-'.uniqid();
     $argsPath = $binPath.'/args.txt';
@@ -507,10 +508,20 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
 
     $reflection = new ReflectionClass(CodexCodingAgent::class);
     $method = $reflection->getMethod('buildTaskPrompt');
-    $prompt = $method->invoke(new CodexCodingAgent, $task);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'task/workflow',
+        'plan' => 'Inspect the workflow and update the implementation.',
+    ]);
+    $prompt = $method->invoke(new CodexCodingAgent, $task, $run);
 
     expect($prompt)
         ->toContain('Acceptance-criteria-driven workflow:')
+        ->toContain('Stored implementation plan:')
+        ->toContain('Inspect the workflow and update the implementation.')
+        ->toContain('Follow the stored implementation plan above as the implementation contract for this run.')
+        ->toContain('Pause and fail only if the stored plan is impossible to execute or contradicts the current task description or acceptance criteria.')
         ->toContain('1. [ ] List criteria before implementation.')
         ->toContain('2. [ ] Report verification proof for each criterion.')
         ->toContain('extract and list every acceptance criterion')
@@ -537,7 +548,12 @@ test('codex agent prompt pauses when acceptance criteria are absent', function (
 
     $reflection = new ReflectionClass(CodexCodingAgent::class);
     $method = $reflection->getMethod('buildTaskPrompt');
-    $prompt = $method->invoke(new CodexCodingAgent, $task);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'task/unclear',
+    ]);
+    $prompt = $method->invoke(new CodexCodingAgent, $task, $run);
 
     expect($prompt)
         ->toContain('- No acceptance criteria were provided.')

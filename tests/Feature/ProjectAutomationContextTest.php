@@ -466,6 +466,9 @@ test('failed approved task keeps approval audit fields', function () {
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Implement the failure path.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: false, error: 'Implementation failed.'));
@@ -542,6 +545,90 @@ test('codex coding agent uses the run workspace as codex workspace and process c
         ->and($args)->toContain('--dangerously-bypass-approvals-and-sandbox')
         ->and($args)->toContain('-C')
         ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath);
+});
+
+test('codex planning uses read only ephemeral sandbox and extracts proposed plan', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-plan-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-plan-codex-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/codex',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '<proposed_plan>\\n## Plan\\n\\n- Inspect files.\\n</proposed_plan>\\n'\n"
+    );
+    chmod($binPath.'/codex', 0755);
+
+    $task = Task::create([
+        'title' => 'Plan in workspace',
+        'description' => 'The coding agent must plan without mutating files.',
+        'acceptance_criteria' => [
+            ['body' => 'Planning uses a read-only sandbox.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_PLANNING,
+        'branch_name' => 'task/planning',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'main',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->plan($task, $run);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and($result->payload['plan'])->toBe("## Plan\n\n- Inspect files.")
+        ->and($args)->toContain('exec')
+        ->and($args)->toContain('--sandbox')
+        ->and($args[array_search('--sandbox', $args, true) + 1])->toBe('read-only')
+        ->and($args)->toContain('--ephemeral')
+        ->and($args)->toContain('-C')
+        ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath)
+        ->and(file_get_contents($argsPath))->toContain('Do not ask the user any questions or request clarification.')
+        ->and(file_get_contents($argsPath))->toContain('choose the safest reasonable assumption and record it in the Assumptions section')
+        ->and(file_get_contents($argsPath))->toContain('Return only the final <proposed_plan> block')
+        ->and(file_get_contents($argsPath))->not->toContain('Ask no questions unless');
+});
+
+test('codex review prompt uses upstream review guidelines with task context', function () {
+    $task = Task::create([
+        'title' => 'Review with upstream prompt',
+        'description' => 'Review should use Codex review mode criteria.',
+        'acceptance_criteria' => [
+            ['body' => 'Review findings are structured.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-upstream',
+        'base_branch' => 'develop',
+    ]);
+
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('buildReviewPrompt');
+    $prompt = $method->invoke(new CodexCodingAgent, $task, $run, 2);
+
+    expect($prompt)
+        ->toContain('Review changes for task '.$task->id.': Review with upstream prompt')
+        ->toContain('Base branch: develop')
+        ->toContain('Review attempt: 2')
+        ->toContain('Review should use Codex review mode criteria.')
+        ->toContain('# Review guidelines:')
+        ->toContain('You are acting as a reviewer for a proposed code change made by another engineer.')
+        ->toContain('Output all findings that the original author would fix if they knew about it.')
+        ->toContain('"overall_correctness": "patch is correct" | "patch is incorrect"')
+        ->toContain('Do not generate a PR fix.')
+        ->toContain('If you report any findings, exit unsuccessfully so the retry loop can send the task back through review.');
 });
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
@@ -711,6 +798,9 @@ test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempt
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Implement and review separately.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
@@ -745,6 +835,13 @@ test('RunApprovedTaskWithCodingAgentJob reviews after tests pass and before pull
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock) use (&$events, $repositoryPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'planning';
+
+                    return new CodingAgentResult(successful: true, payload: ['plan' => 'Implement before review.']);
+                });
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use (&$events, $repositoryPath): CodingAgentResult {
@@ -773,7 +870,8 @@ test('RunApprovedTaskWithCodingAgentJob reviews after tests pass and before pull
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
-    expect($events)->toBe(['implementation', 'review', 'commit-message', 'pull-request']);
+    expect($events)->toBe(['planning', 'implementation', 'review', 'commit-message', 'pull-request'])
+        ->and($run->refresh()->plan)->toBe('Implement before review.');
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
@@ -787,6 +885,9 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Review with retry.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
@@ -821,6 +922,9 @@ test('RunApprovedTaskWithCodingAgentJob fails after three failed reviews', funct
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Review failures continue.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
@@ -869,6 +973,9 @@ test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git co
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Generate a commit message after implementation.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
@@ -911,6 +1018,9 @@ test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when 
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Create changes before push.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
@@ -960,12 +1070,14 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
     runSuccessfulProcess(['git', 'checkout', '-B', 'task/resume-from-review'], $repositoryPath);
     $run->initializeWorkflowState($task);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
     $run->update(['status' => TaskRun::STATUS_FAILED]);
 
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')->never();
             $mock->shouldReceive('run')->never();
             $mock->shouldReceive('reviewChanges')
                 ->once()
@@ -1006,8 +1118,102 @@ test('task run retries the failed checkpoint before the next pending checkpoint'
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
     $run->markCheckpointFailed(TaskRun::CHECKPOINT_CHANGES_REVIEWED, 'Review failed.');
 
-    expect($run->nextIncompleteCheckpoint())->toBe(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)
+    expect($run->nextIncompleteCheckpoint())->toBe(TaskRun::CHECKPOINT_PLANNED)
         ->and($run->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+});
+
+test('task run workflow initializes planning before implementation verification', function () {
+    $task = Task::create([
+        'title' => 'Plan before implementation',
+        'description' => 'Planning should be an automatic checkpoint.',
+        'acceptance_criteria' => [
+            ['body' => 'Planning appears before implementation.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_QUEUED,
+        'branch_name' => 'task/plan-before-implementation',
+    ]);
+
+    $run->initializeWorkflowState($task);
+
+    expect(collect($run->refresh()->workflowCheckpoints())->pluck('name')->all())->toBe([
+        TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
+        TaskRun::CHECKPOINT_PLANNED,
+        TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
+        TaskRun::CHECKPOINT_CHANGES_REVIEWED,
+        TaskRun::CHECKPOINT_CHANGES_COMMITTED,
+        TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
+        TaskRun::CHECKPOINT_REVIEW_REQUESTED,
+        TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED,
+    ]);
+});
+
+test('task run retries a failed planning checkpoint before implementation', function () {
+    $task = Task::create([
+        'title' => 'Retry failed planning',
+        'description' => 'Retry should resume planning before implementation.',
+        'acceptance_criteria' => [
+            ['body' => 'The failed planning checkpoint is retried first.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_FAILED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_FAILED,
+        'branch_name' => 'task/retry-failed-planning',
+    ]);
+
+    $run->initializeWorkflowState($task);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+    $run->markCheckpointFailed(TaskRun::CHECKPOINT_PLANNED, 'Planning failed.');
+
+    expect($run->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_PLANNED);
+});
+
+test('failed planning stores checkpoint failure and does not run implementation', function () {
+    Queue::fake();
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Planning failure');
+    $run = createAutomationRun($task, $repositoryPath, 'task/planning-failure');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: false, error: 'Planning failed.'));
+            $mock->shouldReceive('run')->never();
+            $mock->shouldReceive('reviewChanges')->never();
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->status->toBe(TaskRun::STATUS_FAILED)
+        ->last_error->toBe('Planning failed.')
+        ->plan->toBeNull()
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_PLANNED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
 test('verified implementation marks unchecked acceptance criteria as checked', function () {
@@ -1027,6 +1233,9 @@ test('verified implementation marks unchecked acceptance criteria as checked', f
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Verify all acceptance criteria.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
@@ -1083,6 +1292,9 @@ test('repository checkpoint retry checks out existing ai branch without resettin
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Preserve existing branch work.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
@@ -1410,6 +1622,9 @@ function bindSuccessfulRunMocks(User $expectedReviewer, ?User $expectedActor = n
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Create the pull request.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
@@ -1460,6 +1675,9 @@ function bindSuccessfulRunMocksWithoutReview(?User $expectedActor = null): void
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Create the pull request without review.']));
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));

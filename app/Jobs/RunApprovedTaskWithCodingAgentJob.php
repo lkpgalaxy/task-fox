@@ -72,6 +72,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             while ($checkpoint = $run->nextRunnableCheckpoint()) {
                 match ($checkpoint) {
                     TaskRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
+                    TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
@@ -152,6 +153,30 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $this->createBranch($repositoryPath, $branchName, $baseBranch);
 
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+    }
+
+    private function planImplementation(CodingAgent $codingAgent, Task $task, TaskRun $run): void
+    {
+        $run->markCheckpointRunning(TaskRun::CHECKPOINT_PLANNED);
+        $run->update(['status' => TaskRun::STATUS_PLANNING]);
+
+        $this->log($run, 'info', 'Coding agent planning started');
+
+        $agentResult = $codingAgent->plan($task, $run);
+        $this->logAgentMessages($run, $agentResult);
+
+        if (! $agentResult->successful) {
+            throw new Exception((string) $agentResult->error ?: 'Coding agent planning failed.');
+        }
+
+        $plan = trim((string) ($agentResult->payload['plan'] ?? ''));
+
+        if ($plan === '') {
+            throw new Exception('Coding agent did not return an implementation plan.');
+        }
+
+        $run->update(['plan' => $plan]);
+        $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
     }
 
     private function verifyImplementation(
