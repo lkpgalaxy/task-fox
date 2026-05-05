@@ -626,9 +626,12 @@ test('codex review prompt uses upstream review guidelines with task context', fu
         ->toContain('# Review guidelines:')
         ->toContain('You are acting as a reviewer for a proposed code change made by another engineer.')
         ->toContain('Output all findings that the original author would fix if they knew about it.')
-        ->toContain('"overall_correctness": "patch is correct" | "patch is incorrect"')
+        ->toContain('Return exactly one JSON object with this shape:')
+        ->toContain('"overall_correctness": "patch is correct"')
+        ->toContain('"overall_confidence_score": 0.0')
+        ->toContain('Use an empty findings array when the patch is correct.')
         ->toContain('Do not generate a PR fix.')
-        ->toContain('If you report any findings, exit unsuccessfully so the retry loop can send the task back through review.');
+        ->toContain('If you find any issue, set overall_correctness to "patch is incorrect" and include it in findings.');
 });
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
@@ -902,11 +905,12 @@ test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria
 
 test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Review retry success');
     $run = createAutomationRun($task, $repositoryPath, 'task/review-retry-success');
+    $testsCountPath = $repositoryPath.'/tests-count.txt';
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath)]);
 
     test()->instance(
         CodingAgent::class,
@@ -919,10 +923,25 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
                 ->twice()
+                ->with(Mockery::type(Task::class), Mockery::type(TaskRun::class), Mockery::any())
                 ->andReturn(
-                    new CodingAgentResult(successful: false, error: 'Needs fixes.'),
+                    new CodingAgentResult(
+                        successful: false,
+                        messages: ['review output'],
+                        error: 'Needs fixes.',
+                        payload: ['findings' => [['title' => '[P2] Missing test']]],
+                    ),
                     new CodingAgentResult(successful: true),
                 );
+            $mock->shouldReceive('fixReviewFindings')
+                ->once()
+                ->with(
+                    Mockery::type(Task::class),
+                    Mockery::type(TaskRun::class),
+                    Mockery::on(fn (string $feedback): bool => str_contains($feedback, 'Needs fixes.') && str_contains($feedback, 'review output')),
+                    1,
+                )
+                ->andReturn(new CodingAgentResult(successful: true, messages: ['applied fix']));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: review retry']));
@@ -934,16 +953,19 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
 
     expect($run->refresh())
         ->review_attempt_count->toBe(2)
-        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
 });
 
-test('RunApprovedTaskWithCodingAgentJob fails after three failed reviews', function () {
+test('RunApprovedTaskWithCodingAgentJob fails after the final review attempt without fixing', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
+    config(['automation.agent.retry_limit' => 1]);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Review failures continue');
     $run = createAutomationRun($task, $repositoryPath, 'task/review-failures-continue');
+    $testsCountPath = $repositoryPath.'/tests-count.txt';
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath)]);
 
     test()->instance(
         CodingAgent::class,
@@ -955,8 +977,14 @@ test('RunApprovedTaskWithCodingAgentJob fails after three failed reviews', funct
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
-                ->times(3)
-                ->andReturn(new CodingAgentResult(successful: false, error: 'Review failed.'));
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: false,
+                    messages: ['review output'],
+                    error: 'Review failed.',
+                    payload: ['findings' => [['title' => '[P2] Missing test']]],
+                ));
+            $mock->shouldReceive('fixReviewFindings')->never();
             $mock->shouldReceive('generateCommitMessage')
                 ->never();
         })
@@ -977,11 +1005,120 @@ test('RunApprovedTaskWithCodingAgentJob fails after three failed reviews', funct
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
     expect($run->refresh())
-        ->review_attempt_count->toBe(3)
+        ->review_attempt_count->toBe(1)
         ->status->toBe(TaskRun::STATUS_FAILED)
         ->last_error->toBe('Coding agent review failed after retry limit reached.')
         ->and($run->logs()->where('message', 'Coding agent review failed after retry limit')->exists())
-        ->toBeTrue();
+        ->toBeTrue()
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('1');
+});
+
+test('RunApprovedTaskWithCodingAgentJob fails when the review fixer fails before commit', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Fixer failure');
+    $run = createAutomationRun($task, $repositoryPath, 'task/fixer-failure');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Fix review findings.']));
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: false,
+                    messages: ['review output'],
+                    error: 'Needs fixes.',
+                    payload: ['findings' => [['title' => '[P2] Missing test']]],
+                ));
+            $mock->shouldReceive('fixReviewFindings')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: false, error: 'Fix failed.'));
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->status->toBe(TaskRun::STATUS_FAILED)
+        ->last_error->toBe('Fix failed.')
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
+});
+
+test('RunApprovedTaskWithCodingAgentJob fails when tests fail after a review fix', function () {
+    Queue::fake();
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Tests fail after fix');
+    $run = createAutomationRun($task, $repositoryPath, 'task/tests-fail-after-fix');
+    $testsCountPath = $repositoryPath.'/tests-count.txt';
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 2)]);
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry tests after a fix.']));
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: false,
+                    messages: ['review output'],
+                    error: 'Needs fixes.',
+                    payload: ['findings' => [['title' => '[P2] Missing test']]],
+                ));
+            $mock->shouldReceive('fixReviewFindings')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, messages: ['fixed']));
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($run->refresh())
+        ->status->toBe(TaskRun::STATUS_FAILED)
+        ->last_error->toBe('Tests failed after review fix.')
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING)
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
 });
 
 test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git commit', function () {
@@ -1860,4 +1997,15 @@ function runSuccessfulProcessWithOutput(array $command, string $cwd): string
     }
 
     return (string) $process->getOutput();
+}
+
+function reviewCountingTestCommand(string $path, ?int $failOnInvocation = null): string
+{
+    $script = 'count=0; if [ -f '.escapeshellarg($path).' ]; then count=$(cat '.escapeshellarg($path).'); fi; count=$((count + 1)); printf %s "$count" > '.escapeshellarg($path).';';
+
+    if ($failOnInvocation !== null) {
+        $script .= ' if [ "$count" -eq '.(int) $failOnInvocation.' ]; then exit 1; fi;';
+    }
+
+    return 'sh -c '.escapeshellarg($script);
 }

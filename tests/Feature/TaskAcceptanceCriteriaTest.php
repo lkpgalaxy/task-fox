@@ -537,6 +537,179 @@ test('codex agent prompt enforces acceptance criteria driven implementation work
         ->toContain('Final response must include the acceptance-criteria checklist, tests run, and whether they passed');
 });
 
+test('codex review command uses native review mode and parses a passing JSON response', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-codex-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+    $outputPath = $workspacePath.'/last-message.json';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    createCodexReviewStub(
+        $binPath,
+        $argsPath,
+        '{"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks good.","overall_confidence_score":0.98}',
+    );
+
+    $task = Task::create([
+        'title' => 'Review command',
+        'description' => 'Review should use codex exec review.',
+        'acceptance_criteria' => [
+            ['body' => 'Review mode is used.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-command',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->reviewChanges($task, $run, 3);
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+
+    expect($result->successful)->toBeTrue()
+        ->and($result->payload['overall_correctness'])->toBe('patch is correct')
+        ->and($args)->toContain('exec')
+        ->and($args)->toContain('-C')
+        ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath)
+        ->and($args)->toContain('review')
+        ->and($args)->toContain('--base')
+        ->and($args[array_search('--base', $args, true) + 1])->toBe('develop')
+        ->and($args)->toContain('--uncommitted')
+        ->and($args)->toContain('--title')
+        ->and($args[array_search('--title', $args, true) + 1])->toBe('Task '.$task->id.': Review command')
+        ->and($args)->toContain('--output-last-message')
+        ->and($args[array_search('--output-last-message', $args, true) + 1])->toStartWith(sys_get_temp_dir())
+        ->and(file_get_contents($argsPath))->toContain('"overall_correctness": "patch is correct"')
+        ->and(file_get_contents($argsPath))->toContain('Return exactly one JSON object with this shape:');
+});
+
+test('codex review command surfaces findings as a failed review result', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-findings-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-findings-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    createCodexReviewStub(
+        $binPath,
+        $argsPath,
+        '{"findings":[{"title":"[P2] Missing test","body":"Add a test for the new behavior.","confidence_score":0.87,"priority":2,"code_location":{"absolute_file_path":"/tmp/example.php","line_range":{"start":1,"end":3}}}],"overall_correctness":"patch is incorrect","overall_explanation":"The test coverage is missing.","overall_confidence_score":0.87}',
+    );
+
+    $task = Task::create([
+        'title' => 'Review findings',
+        'description' => 'Review should surface findings.',
+        'acceptance_criteria' => [
+            ['body' => 'Findings are returned.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-findings',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->reviewChanges($task, $run, 1);
+
+    expect($result->successful)->toBeFalse()
+        ->and($result->payload['overall_correctness'])->toBe('patch is incorrect')
+        ->and($result->payload['findings'])->toHaveCount(1)
+        ->and($result->payload['findings'][0]['title'])->toBe('[P2] Missing test');
+});
+
+test('codex review command fails closed on invalid json output', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-invalid-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-invalid-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    createCodexReviewStub($binPath, $argsPath, 'not json');
+
+    $task = Task::create([
+        'title' => 'Review invalid json',
+        'description' => 'Invalid output should fail closed.',
+        'acceptance_criteria' => [
+            ['body' => 'Invalid JSON is rejected.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-invalid',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'develop',
+    ]);
+
+    $result = (new CodexCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->reviewChanges($task, $run, 1);
+
+    expect($result->successful)->toBeFalse()
+        ->and($result->error)->toStartWith('Coding agent returned invalid review JSON:')
+        ->and($result->payload['raw_output'])->toBe('not json');
+});
+
+test('codex review fix prompt includes the review feedback and fix instructions', function () {
+    $task = Task::create([
+        'title' => 'Fix review findings',
+        'description' => 'Use review feedback to make the smallest correct change.',
+        'acceptance_criteria' => [
+            ['body' => 'The fix prompt includes the stored plan.', 'checked' => false],
+        ],
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/fix-review-findings',
+        'base_branch' => 'develop',
+        'plan' => 'Keep the change minimal.',
+    ]);
+
+    $reflection = new ReflectionClass(CodexCodingAgent::class);
+    $method = $reflection->getMethod('buildFixReviewPrompt');
+    $prompt = $method->invoke(
+        new CodexCodingAgent,
+        $task,
+        $run,
+        "Error: Needs fixes.\n\nMessages:\n- review output\n\nPayload:\n{\"findings\":[]}",
+        2,
+    );
+
+    expect($prompt)
+        ->toContain('Fix the review findings for task '.$task->id.': Fix review findings')
+        ->toContain('Use review feedback to make the smallest correct change.')
+        ->toContain('Acceptance criteria:')
+        ->toContain('The fix prompt includes the stored plan.')
+        ->toContain('Stored implementation plan:')
+        ->toContain('Keep the change minimal.')
+        ->toContain('Base branch: develop')
+        ->toContain('Review attempt: 2')
+        ->toContain('Review feedback:')
+        ->toContain('Needs fixes.')
+        ->toContain('Make the smallest correct fix that resolves the review feedback.')
+        ->toContain('Do not commit, push, or create a pull request.')
+        ->toContain('leave a final checklist of the addressed findings in your response');
+});
+
 test('codex agent prompt pauses when acceptance criteria are absent', function () {
     $task = Task::create([
         'title' => 'Implement unclear task',
@@ -843,4 +1016,33 @@ function runTaskAcceptanceProcess(array $command, string $cwd): string
     }
 
     return (string) $process->getOutput();
+}
+
+function createCodexReviewStub(string $binPath, string $argsPath, string $outputContent): void
+{
+    $script = <<<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > '__ARGS_PATH__'
+output_file=''
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output-last-message" ]; then
+        shift
+        output_file="$1"
+        break
+    fi
+    shift
+done
+cat <<'__OUTPUT_MARKER__' > "$output_file"
+__OUTPUT_CONTENT__
+__OUTPUT_MARKER__
+SH;
+
+    $script = str_replace(
+        ['__ARGS_PATH__', '__OUTPUT_CONTENT__'],
+        [$argsPath, $outputContent],
+        $script,
+    );
+
+    file_put_contents($binPath.'/codex', $script);
+    chmod($binPath.'/codex', 0755);
 }

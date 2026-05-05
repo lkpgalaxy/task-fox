@@ -123,11 +123,95 @@ class CodexCodingAgent implements CodingAgent
 
     public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult
     {
+        $repositoryPath = $this->resolveWorkspacePath($run);
+        $outputPath = $this->makeTemporaryOutputPath('codex-review-');
+
+        if ($outputPath === '') {
+            return new CodingAgentResult(
+                successful: false,
+                error: 'Unable to create a temporary file for Codex review output.',
+            );
+        }
+
+        try {
+            $process = new Process(
+                $this->buildReviewCommand($task, $run, $attempt, $outputPath),
+                $repositoryPath,
+            );
+            $process->setTimeout(null);
+            $process->setEnv(array_merge(
+                $this->context,
+                [
+                    'TASK_ID' => (string) $task->id,
+                    'TASK_RUN_ID' => (string) $run->id,
+                    'TASK_WORKSPACE_PATH' => $repositoryPath,
+                ],
+            ));
+            $process->run();
+
+            $stdout = trim((string) $process->getOutput());
+            $stderr = trim((string) $process->getErrorOutput());
+            $rawOutput = trim((string) @file_get_contents($outputPath));
+
+            $messages = array_values(
+                array_filter([
+                    'Coding agent review command completed.',
+                    $rawOutput !== '' ? "Output: {$rawOutput}" : null,
+                    $stdout !== '' ? "STDOUT: {$stdout}" : null,
+                    $stderr !== '' ? "STDERR: {$stderr}" : null,
+                ], static fn (?string $message): bool => $message !== null),
+            );
+
+            try {
+                $payload = $this->decodeReviewPayload($rawOutput);
+            } catch (JsonException $exception) {
+                return new CodingAgentResult(
+                    successful: false,
+                    messages: $messages,
+                    error: 'Coding agent returned invalid review JSON: '.$exception->getMessage(),
+                    payload: [
+                        'raw_output' => $rawOutput,
+                        'stdout' => $stdout,
+                        'stderr' => $stderr,
+                    ],
+                );
+            }
+
+            $findings = $payload['findings'] ?? [];
+            $overallCorrectness = (string) ($payload['overall_correctness'] ?? '');
+            $overallExplanation = trim((string) ($payload['overall_explanation'] ?? ''));
+
+            if ($overallCorrectness === 'patch is correct' && $findings === []) {
+                return new CodingAgentResult(
+                    successful: true,
+                    messages: $messages,
+                    payload: $payload,
+                );
+            }
+
+            return new CodingAgentResult(
+                successful: false,
+                messages: array_values(array_filter([
+                    ...$messages,
+                    $overallExplanation !== '' ? "Review explanation: {$overallExplanation}" : null,
+                ], static fn (?string $message): bool => $message !== null)),
+                error: $overallExplanation !== '' ? $overallExplanation : 'Coding agent review reported findings.',
+                payload: $payload,
+            );
+        } finally {
+            if (is_file($outputPath)) {
+                @unlink($outputPath);
+            }
+        }
+    }
+
+    public function fixReviewFindings(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): CodingAgentResult
+    {
         return $this->executeTaskCommand(
             $task,
             $run,
-            $this->buildReviewPrompt($task, $run, $attempt),
-            'Coding agent review command completed.',
+            $this->buildFixReviewPrompt($task, $run, $reviewFeedback, $attempt),
+            'Coding agent review fix command completed.',
         );
     }
 
@@ -273,7 +357,77 @@ Apply these Codex review guidelines:
 
 {$reviewGuidelines}
 
-For this automation run, exit successfully only when the reviewed changes are ready to commit. If you report any findings, exit unsuccessfully so the retry loop can send the task back through review.
+Return exactly one JSON object with this shape:
+{
+  "findings": [
+    {
+      "title": "[P2] Short imperative summary",
+      "body": "One-paragraph explanation of the issue and when it matters.",
+      "confidence_score": 0.0,
+      "priority": 2,
+      "code_location": {
+        "absolute_file_path": "/absolute/path/to/file",
+        "line_range": {
+          "start": 1,
+          "end": 1
+        }
+      }
+    }
+  ],
+  "overall_correctness": "patch is correct",
+  "overall_explanation": "Short explanation of the overall verdict.",
+  "overall_confidence_score": 0.0
+}
+
+Rules:
+- Return no markdown fences, no prose, and no extra keys.
+- Use an empty findings array when the patch is correct.
+- Set overall_correctness to "patch is correct" only when there are no findings.
+- Keep code_location ranges as short as possible.
+- If you find any issue, set overall_correctness to "patch is incorrect" and include it in findings.
+PROMPT;
+    }
+
+    private function buildFixReviewPrompt(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): string
+    {
+        $criteria = $this->acceptanceCriteria($task);
+        $criteriaList = $criteria->isEmpty()
+            ? '- No acceptance criteria were provided.'
+            : $criteria
+                ->map(static function (array $criterion, int $index): string {
+                    $status = $criterion['checked'] ? '[x]' : '[ ]';
+
+                    return ($index + 1).". {$status} {$criterion['body']}";
+                })
+                ->join("\n");
+
+        $plan = trim((string) $run->plan);
+        $planBlock = $plan !== '' ? $plan : 'No stored implementation plan was recorded.';
+        $baseBranch = $run->base_branch ?: 'main';
+
+        return <<<PROMPT
+Fix the review findings for task {$task->id}: {$task->title}
+
+Task description:
+{$task->description}
+
+Acceptance criteria:
+{$criteriaList}
+
+Stored implementation plan:
+{$planBlock}
+
+Base branch: {$baseBranch}
+Review attempt: {$attempt}
+
+Review feedback:
+{$reviewFeedback}
+
+Instructions:
+- Make the smallest correct fix that resolves the review feedback.
+- Preserve unrelated changes.
+- Do not commit, push, or create a pull request.
+- After fixing the code, leave a final checklist of the addressed findings in your response.
 PROMPT;
     }
 
@@ -637,6 +791,27 @@ PAYLOAD;
         ];
     }
 
+    private function buildReviewCommand(Task $task, TaskRun $run, int $attempt, string $outputPath): array
+    {
+        $repositoryPath = $this->resolveWorkspacePath($run);
+
+        return [
+            $this->codexExecutable(),
+            'exec',
+            '-C',
+            $repositoryPath,
+            'review',
+            '--base',
+            $run->base_branch ?: 'main',
+            '--uncommitted',
+            '--title',
+            "Task {$task->id}: {$task->title}",
+            '--output-last-message',
+            $outputPath,
+            $this->buildReviewPrompt($task, $run, $attempt),
+        ];
+    }
+
     private function codexExecutable(): string
     {
         $path = (string) Arr::get($this->context, 'PATH', '');
@@ -677,5 +852,17 @@ PAYLOAD;
         $decoded = json_decode($json, true, flags: JSON_THROW_ON_ERROR);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function decodeReviewPayload(string $output): array
+    {
+        return $this->decodeJsonPayload($output);
+    }
+
+    private function makeTemporaryOutputPath(string $prefix): string
+    {
+        $path = tempnam(sys_get_temp_dir(), $prefix);
+
+        return $path !== false ? $path : '';
     }
 }

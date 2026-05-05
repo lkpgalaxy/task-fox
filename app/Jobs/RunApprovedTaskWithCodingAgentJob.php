@@ -74,7 +74,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
-                    TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run),
+                    TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run, $repositoryPath),
                     TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED => $this->verifyAcceptanceCriteria($task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     TaskRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
@@ -365,7 +365,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         ]);
     }
 
-    private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run): void
+    private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run, string $repositoryPath): void
     {
         $maxReviewAttempts = max(1, (int) config('automation.agent.retry_limit', 3));
 
@@ -393,16 +393,42 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 return;
             }
 
+            if ($attempt >= $maxReviewAttempts) {
+                $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
+                    'max_attempts' => $maxReviewAttempts,
+                    'error' => $agentResult->error,
+                ]);
+
+                throw new Exception('Coding agent review failed after retry limit reached.');
+            }
+
+            $reviewFeedback = $this->buildReviewFeedback($agentResult);
+
             $this->log($run, 'warning', 'Coding agent review failed', [
                 'attempt' => $attempt,
                 'max_attempts' => $maxReviewAttempts,
                 'error' => $agentResult->error,
             ]);
-        }
 
-        $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
-            'max_attempts' => $maxReviewAttempts,
-        ]);
+            $this->log($run, 'info', 'Coding agent review fix started', [
+                'attempt' => $attempt,
+            ]);
+
+            $fixResult = $codingAgent->fixReviewFindings($task, $run, $reviewFeedback, $attempt);
+            $this->logAgentMessages($run, $fixResult);
+
+            if (! $fixResult->successful) {
+                throw new Exception((string) $fixResult->error ?: 'Coding agent review fix failed.');
+            }
+
+            $this->log($run, 'info', 'Coding agent review fix completed', [
+                'attempt' => $attempt,
+            ]);
+
+            if (! $this->runTests($repositoryPath, $run)) {
+                throw new Exception('Tests failed after review fix.');
+            }
+        }
 
         throw new Exception('Coding agent review failed after retry limit reached.');
     }
@@ -626,6 +652,31 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         foreach ($agentResult->messages as $message) {
             $this->log($run, 'info', 'Coding agent output', ['message' => $message]);
         }
+    }
+
+    private function buildReviewFeedback(CodingAgentResult $agentResult): string
+    {
+        $sections = [];
+
+        if ($agentResult->error !== null && $agentResult->error !== '') {
+            $sections[] = 'Error: '.$agentResult->error;
+        }
+
+        if ($agentResult->messages !== []) {
+            $sections[] = "Messages:\n".implode("\n", array_map(
+                static fn (string $message): string => '- '.$message,
+                $agentResult->messages,
+            ));
+        }
+
+        if ($agentResult->payload !== []) {
+            $sections[] = "Payload:\n".json_encode(
+                $agentResult->payload,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+            );
+        }
+
+        return implode("\n\n", $sections);
     }
 
     private function resolveBaseBranch(TaskRun $run): string
