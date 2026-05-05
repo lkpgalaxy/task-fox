@@ -366,6 +366,8 @@ class TaskController extends Controller
             );
         }
 
+        DispatchNextTaskRunJob::dispatch();
+
         return redirect()
             ->route('tasks.index')
             ->with('status', 'Task rejected.');

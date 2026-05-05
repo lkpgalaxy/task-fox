@@ -81,7 +81,7 @@ test('approve requires a project before changing task status', function () {
     expect($task->refresh()->status)->toBe(Task::STATUS_APPROVED);
 });
 
-test('reject can change task status without a project', function () {
+test('reject marks task rejected and dispatches the next task without a project', function () {
     Queue::fake();
 
     User::factory()->create();
@@ -103,6 +103,8 @@ test('reject can change task status without a project', function () {
         ->project_id->toBeNull()
         ->status->toBe(Task::STATUS_REJECTED)
         ->rejected_at->not->toBeNull();
+
+    Queue::assertPushed(DispatchNextTaskRunJob::class);
 });
 
 test('failed tasks can be retried and queued for execution', function () {
