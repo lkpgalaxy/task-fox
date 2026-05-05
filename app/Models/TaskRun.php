@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Storage;
 
 #[Fillable([
     'task_id',
@@ -38,6 +39,12 @@ use Illuminate\Support\Arr;
 ])]
 class TaskRun extends Model
 {
+    private const STOP_REQUESTED_AT = 'stop_requested_at';
+
+    private const STOP_REQUESTED_BY_USER_ID = 'stop_requested_by_user_id';
+
+    private const STOP_REQUEST_REASON = 'stop_requested_reason';
+
     public const CHECKPOINT_REPOSITORY_PREPARED = 'repository_prepared';
 
     public const CHECKPOINT_PLANNED = 'planned';
@@ -108,6 +115,18 @@ class TaskRun extends Model
         self::STATUS_WAITING_FOR_MERGE,
     ];
 
+    public const EXECUTION_STATUSES = [
+        self::STATUS_PREPARING,
+        self::STATUS_PLANNING,
+        self::STATUS_IMPLEMENTING,
+        self::STATUS_TESTING,
+        self::STATUS_SCREENSHOTTING,
+        self::STATUS_REVIEWING_CHANGES,
+        self::STATUS_GENERATING_COMMIT_MESSAGE,
+        self::STATUS_COMMITTING_CHANGES,
+        self::STATUS_CREATING_PR,
+    ];
+
     public const WORKFLOW_CHECKPOINTS = [
         self::CHECKPOINT_REPOSITORY_PREPARED,
         self::CHECKPOINT_PLANNED,
@@ -166,6 +185,11 @@ class TaskRun extends Model
         return in_array($this->status, self::ACTIVE_STATUSES, true);
     }
 
+    public function isExecutionActive(): bool
+    {
+        return in_array($this->status, self::EXECUTION_STATUSES, true);
+    }
+
     public function initializeWorkflowState(Task $task): void
     {
         $state = is_array($this->workflow_state) ? $this->workflow_state : [];
@@ -208,6 +232,61 @@ class TaskRun extends Model
         $hash = Arr::get($this->workflow_state, 'request_hash');
 
         return is_string($hash) && $hash !== '' ? $hash : null;
+    }
+
+    public function stopRequested(): bool
+    {
+        $requestedAt = Arr::get($this->workflow_state, self::STOP_REQUESTED_AT);
+
+        return is_string($requestedAt) && trim($requestedAt) !== '';
+    }
+
+    public function stopRequestMessage(string $fallback = 'Task run stop requested.'): string
+    {
+        $message = Arr::get($this->workflow_state, self::STOP_REQUEST_REASON);
+
+        return is_string($message) && trim($message) !== ''
+            ? trim($message)
+            : $fallback;
+    }
+
+    public function requestStop(?int $requestedByUserId = null, ?string $reason = null): void
+    {
+        $state = is_array($this->workflow_state) ? $this->workflow_state : [];
+
+        if (! $this->stopRequested()) {
+            $state[self::STOP_REQUESTED_AT] = now()->toIso8601String();
+        }
+
+        if ($requestedByUserId !== null) {
+            $state[self::STOP_REQUESTED_BY_USER_ID] = $requestedByUserId;
+        }
+
+        if ($reason !== null && trim($reason) !== '') {
+            $state[self::STOP_REQUEST_REASON] = trim($reason);
+        }
+
+        $this->forceFill(['workflow_state' => $state])->save();
+        $this->refresh();
+    }
+
+    public function clearStopRequest(): void
+    {
+        $state = is_array($this->workflow_state) ? $this->workflow_state : [];
+
+        unset(
+            $state[self::STOP_REQUESTED_AT],
+            $state[self::STOP_REQUESTED_BY_USER_ID],
+            $state[self::STOP_REQUEST_REASON],
+        );
+
+        $this->forceFill(['workflow_state' => $state])->save();
+        $this->refresh();
+    }
+
+    public function screenshotPath(): string
+    {
+        return Storage::disk('local')->path("task-runs/{$this->id}/screenshots/implementation.png");
     }
 
     public static function requestHashForTask(Task $task): string

@@ -46,10 +46,14 @@ class CodexCodingAgent implements CodingAgent
                 'TASK_WORKSPACE_PATH' => $repositoryPath,
             ],
         ));
-        $process->run();
+        $this->runInterruptibleProcess($process, $run);
 
         $output = trim((string) $process->getOutput());
         $errorOutput = trim((string) $process->getErrorOutput());
+
+        if ($this->stopRequested($run)) {
+            return $this->stopResult($run, $command);
+        }
 
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
@@ -94,10 +98,14 @@ class CodexCodingAgent implements CodingAgent
                 'TASK_WORKSPACE_PATH' => $repositoryPath,
             ],
         ));
-        $process->run();
+        $this->runInterruptibleProcess($process, $run);
 
         $output = trim((string) $process->getOutput());
         $errorOutput = trim((string) $process->getErrorOutput());
+
+        if ($this->stopRequested($run)) {
+            return $this->stopResult($run, $command);
+        }
 
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent planning command failed.';
@@ -164,7 +172,7 @@ class CodexCodingAgent implements CodingAgent
                     'TASK_WORKSPACE_PATH' => $repositoryPath,
                 ],
             ));
-            $process->run();
+            $this->runInterruptibleProcess($process, $run);
 
             $stdout = trim((string) $process->getOutput());
             $stderr = trim((string) $process->getErrorOutput());
@@ -178,6 +186,10 @@ class CodexCodingAgent implements CodingAgent
                     $stderr !== '' ? "STDERR: {$stderr}" : null,
                 ], static fn (?string $message): bool => $message !== null),
             );
+
+            if ($this->stopRequested($run)) {
+                return $this->stopResult($run, $command);
+            }
 
             if ($rawOutput === '') {
                 return new CodingAgentResult(
@@ -199,7 +211,7 @@ class CodexCodingAgent implements CodingAgent
                 'stderr' => $stderr,
             ];
 
-            if (! $this->reviewTextHasFindings($rawOutput)) {
+            if (! $this->reviewTextHasFindings($run, $rawOutput)) {
                 return new CodingAgentResult(
                     successful: true,
                     messages: $messages,
@@ -246,28 +258,63 @@ class CodexCodingAgent implements CodingAgent
         );
     }
 
-    private function reviewTextHasFindings(string $output): bool
+    private function reviewTextHasFindings(TaskRun $run, string $output): bool
     {
-        $normalizedOutput = mb_strtolower(trim($output));
+        $repositoryPath = $this->resolveWorkspacePath($run);
+        $command = $this->buildReviewClassificationCommand(
+            $run,
+            $this->buildReviewClassificationPrompt($output),
+            $this->resolveRunSetting($run, 'review_model'),
+            $this->resolveRunSetting($run, 'review_reasoning_effort'),
+        );
 
-        if ($normalizedOutput === '') {
-            return false;
+        $process = new Process($command, $repositoryPath);
+        $process->setTimeout(null);
+        $process->setEnv(array_merge(
+            $this->context,
+            [
+                'TASK_RUN_ID' => (string) $run->id,
+                'TASK_WORKSPACE_PATH' => $repositoryPath,
+            ],
+        ));
+        $this->runInterruptibleProcess($process, $run);
+
+        if ($this->stopRequested($run)) {
+            return true;
         }
 
-        foreach ([
-            'no findings',
-            'no issues found',
-            'no actionable findings',
-            'no blocking issues',
-            'no discrete correctness issues',
-            'patch is correct',
-        ] as $passingPhrase) {
-            if (str_contains($normalizedOutput, $passingPhrase)) {
-                return false;
-            }
+        if (! $process->isSuccessful()) {
+            return true;
         }
 
-        return true;
+        try {
+            $payload = $this->decodeJsonPayload(trim((string) $process->getOutput()));
+        } catch (JsonException) {
+            return true;
+        }
+
+        return ! filter_var(Arr::get($payload, 'pass'), FILTER_VALIDATE_BOOL);
+    }
+
+    private function buildReviewClassificationPrompt(string $output): string
+    {
+        $reviewText = $this->limitPromptText($output, 12000);
+
+        return <<<PROMPT
+Classify this code review output.
+
+Return only a valid JSON object with this exact shape:
+{"pass": true}
+
+Rules:
+- pass=true only when the review clearly means the patch should pass review with no blocking or actionable findings left to fix.
+- pass=false when the review contains any finding, requested fix, blocker, regression risk, or unresolved issue.
+- If the review is ambiguous, return pass=false.
+- Do not include markdown fences or any text outside the JSON object.
+
+Review output:
+{$reviewText}
+PROMPT;
     }
 
     public function fixReviewFindings(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): CodingAgentResult
@@ -352,7 +399,7 @@ PROMPT;
     private function buildScreenshotPrompt(Task $task, TaskRun $run): string
     {
         $projectUrl = trim((string) $task->project?->url);
-        $screenshotPath = storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
+        $screenshotPath = $run->screenshotPath();
 
         return <<<PROMPT
 Capture a verification screenshot for task {$task->id}: {$task->title}
@@ -668,10 +715,14 @@ PAYLOAD;
                 'TASK_WORKSPACE_PATH' => $repositoryPath,
             ],
         ));
-        $process->run();
+        $this->runInterruptibleProcess($process, $run);
 
         $output = trim((string) $process->getOutput());
         $errorOutput = trim((string) $process->getErrorOutput());
+
+        if ($this->stopRequested($run)) {
+            return $this->stopResult($run, $command);
+        }
 
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
@@ -701,6 +752,45 @@ PAYLOAD;
         return [
             'command' => $command,
         ];
+    }
+
+    private function runInterruptibleProcess(Process $process, TaskRun $run): void
+    {
+        $process->start();
+
+        while ($process->isRunning()) {
+            if ($this->stopRequested($run)) {
+                $process->stop(1);
+
+                break;
+            }
+
+            usleep(250000);
+        }
+
+        $process->wait();
+    }
+
+    private function stopRequested(TaskRun $run): bool
+    {
+        $freshRun = TaskRun::query()->find($run->id);
+
+        return $freshRun?->stopRequested() ?? false;
+    }
+
+    /**
+     * @param  list<string>  $command
+     */
+    private function stopResult(TaskRun $run, array $command): CodingAgentResult
+    {
+        $freshRun = TaskRun::query()->find($run->id);
+        $message = $freshRun?->stopRequestMessage() ?? 'Task run stop requested.';
+
+        return new CodingAgentResult(
+            successful: false,
+            error: $message,
+            context: $this->commandLogContext($command),
+        );
     }
 
     /**
@@ -739,6 +829,24 @@ PAYLOAD;
             ...$this->modelArguments($model),
             ...$this->reasoningEffortArguments($reasoningEffort),
             '--dangerously-bypass-approvals-and-sandbox',
+            '-C',
+            $repositoryPath,
+            $prompt,
+        ];
+    }
+
+    private function buildReviewClassificationCommand(TaskRun $run, string $prompt, ?string $model = null, ?string $reasoningEffort = null): array
+    {
+        $repositoryPath = $this->resolveWorkspacePath($run);
+
+        return [
+            $this->codexExecutable(),
+            'exec',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
+            '--sandbox',
+            'read-only',
+            '--ephemeral',
             '-C',
             $repositoryPath,
             $prompt,

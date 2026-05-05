@@ -46,6 +46,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
         try {
             $run->initializeWorkflowState($task);
+            $this->throwIfStopRequested($run);
 
             if (! $run->hasMatchingRequestHash($task)) {
                 throw new Exception('Task request changed since this task run was created.');
@@ -70,6 +71,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
 
             while ($checkpoint = $run->nextRunnableCheckpoint()) {
+                $this->throwIfStopRequested($run);
+
                 match ($checkpoint) {
                     TaskRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
@@ -82,6 +85,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED => $this->updateExternalTask($externalTaskProvider, $task, $run),
                     default => throw new Exception("Unknown task run checkpoint [{$checkpoint}]."),
                 };
+
+                $this->throwIfStopRequested($run);
             }
 
             $this->markRunWaitingForMerge($task, $run);
@@ -90,40 +95,65 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'pull_request_url' => $run->pull_request_url,
             ]);
         } catch (Throwable $exception) {
+            $run->refresh();
             $checkpoint = $run->runningCheckpoint() ?? $run->nextRunnableCheckpoint();
             if ($checkpoint !== null) {
                 $run->markCheckpointFailed($checkpoint, $exception->getMessage());
             }
 
-            $task->update([
-                'status' => Task::STATUS_FAILED,
-            ]);
+            if ($run->stopRequested()) {
+                $task->refresh();
 
-            $run->update([
-                'status' => TaskRun::STATUS_FAILED,
-                'last_error' => $exception->getMessage(),
-                'finished_at' => now(),
-            ]);
+                if (! in_array($task->status, [Task::STATUS_REJECTED, Task::STATUS_FAILED], true)) {
+                    $task->update([
+                        'status' => Task::STATUS_FAILED,
+                    ]);
+                    $task->refresh();
+                }
 
-            $this->log($run, 'error', 'Task run failed', [
-                'error' => $exception->getMessage(),
-            ]);
-
-            if ($task->externalTaskLink) {
-                $task->externalTaskLink->messages()->create([
-                    'type' => 'attempt',
-                    'payload' => ['run_id' => $run->id],
-                    'status' => 'failed',
-                    'error' => $exception->getMessage(),
-                    'sent_at' => now(),
+                $stopMessage = $run->stopRequestMessage($exception->getMessage());
+                $run->update([
+                    'status' => $task->status === Task::STATUS_REJECTED
+                        ? TaskRun::STATUS_REJECTED
+                        : TaskRun::STATUS_FAILED,
+                    'last_error' => $stopMessage,
+                    'finished_at' => now(),
                 ]);
+
+                $this->log($run, 'warning', 'Task run stopped', [
+                    'error' => $stopMessage,
+                ]);
+            } else {
+                $task->update([
+                    'status' => Task::STATUS_FAILED,
+                ]);
+
+                $run->update([
+                    'status' => TaskRun::STATUS_FAILED,
+                    'last_error' => $exception->getMessage(),
+                    'finished_at' => now(),
+                ]);
+
+                $this->log($run, 'error', 'Task run failed', [
+                    'error' => $exception->getMessage(),
+                ]);
+
+                if ($task->externalTaskLink) {
+                    $task->externalTaskLink->messages()->create([
+                        'type' => 'attempt',
+                        'payload' => ['run_id' => $run->id],
+                        'status' => 'failed',
+                        'error' => $exception->getMessage(),
+                        'sent_at' => now(),
+                    ]);
+                }
             }
         } finally {
             DispatchNextTaskRunJob::dispatch();
         }
     }
 
-    private function makeBranchName(Task $task): string
+    private function makeBranchName(TaskRun $run, Task $task): string
     {
         $slug = Str::slug((string) $task->title);
 
@@ -131,7 +161,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             $slug = 'task';
         }
 
-        return 'ai-task-'.(string) $task->id.'-'.Str::limit($slug, 40, '');
+        $timestamp = ($run->created_at ?? now())->format('YmdHis');
+
+        return 'ai-task-'.(string) $task->id.'-'.Str::limit($slug, 40, '').'-'.$timestamp;
     }
 
     private function resolveBranchName(TaskRun $run, Task $task): string
@@ -139,7 +171,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $branchName = trim((string) $run->branch_name);
 
         if ($branchName === '' || $branchName === 'pending') {
-            return $this->makeBranchName($task);
+            return $this->makeBranchName($run, $task);
         }
 
         return $branchName;
@@ -192,6 +224,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $retryLimit = $this->retryLimit($run);
 
         for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
+            $this->throwIfStopRequested($run);
+
             $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
             $run->update([
                 'status' => TaskRun::STATUS_IMPLEMENTING,
@@ -211,8 +245,12 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 throw new Exception((string) $agentResult->error ?: 'Coding agent execution failed.');
             }
 
+            $this->throwIfStopRequested($run);
+
             if ($this->runTests($repositoryPath, $run)) {
+                $this->throwIfStopRequested($run);
                 $this->verifyProjectUrl($codingAgent, $task, $run);
+                $this->throwIfStopRequested($run);
                 $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
 
                 return;
@@ -249,6 +287,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function verifyProjectUrl(CodingAgent $codingAgent, Task $task, TaskRun $run): void
     {
+        $this->throwIfStopRequested($run);
+
         $projectUrl = trim((string) $task->project?->url);
         if ($projectUrl === '') {
             $this->log($run, 'info', 'URL smoke test skipped', [
@@ -269,6 +309,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             throw new Exception((string) $agentResult->error ?: 'URL smoke test failed.');
         }
 
+        $this->throwIfStopRequested($run);
+
         $this->log($run, 'info', 'URL smoke test passed', [
             'project_url' => $projectUrl,
         ]);
@@ -276,6 +318,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function verifyScreenshot(CodingAgent $codingAgent, Task $task, TaskRun $run): void
     {
+        $this->throwIfStopRequested($run);
+
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
         $run->update(['status' => TaskRun::STATUS_SCREENSHOTTING]);
 
@@ -308,6 +352,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         if (! $agentResult->successful) {
             throw new Exception((string) $agentResult->error ?: 'Screenshot verification failed.');
         }
+
+        $this->throwIfStopRequested($run);
 
         clearstatcache(true, $screenshotPath);
 
@@ -409,8 +455,11 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function runTests(string $path, TaskRun $run): bool
     {
+        $this->throwIfStopRequested($run);
+
         $command = (string) config('automation.tests.command', 'php artisan test --compact');
-        $process = $this->runProcess($command, $path);
+        $process = $this->runProcess($command, $path, [], $run);
+        $this->throwIfStopRequested($run);
         $failureOutput = $this->formatTestFailure($command, $process);
 
         $run->update(['status' => TaskRun::STATUS_TESTING]);
@@ -466,7 +515,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function screenshotPath(TaskRun $run): string
     {
-        return storage_path("app/task-runs/{$run->id}/screenshots/implementation.png");
+        return $run->screenshotPath();
     }
 
     private function reviewChanges(CodingAgent $codingAgent, Task $task, TaskRun $run, string $repositoryPath): void
@@ -476,6 +525,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $testFailure = null;
 
         for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
+            $this->throwIfStopRequested($run);
+
             $run->markCheckpointRunning(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
             $run->update([
                 'status' => TaskRun::STATUS_REVIEWING_CHANGES,
@@ -521,6 +572,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 ]);
             }
 
+            $this->throwIfStopRequested($run);
+
             $this->log($run, 'info', 'Coding agent review fix started', array_merge(
                 $this->agentLogContext($run, 'review_fix'),
                 ['attempt' => $attempt],
@@ -536,6 +589,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             $this->log($run, 'info', 'Coding agent review fix completed', [
                 'attempt' => $attempt,
             ]);
+
+            $this->throwIfStopRequested($run);
 
             if (! $this->runTests($repositoryPath, $run)) {
                 $testFailure = trim((string) $run->refresh()->last_error);
@@ -952,15 +1007,52 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
      * @param  array<int, string>|string  $command
      * @param  array<string, string>  $environment
      */
-    private function runProcess(array|string $command, string $path, array $environment = []): Process
+    private function runProcess(array|string $command, string $path, array $environment = [], ?TaskRun $run = null): Process
     {
         $process = is_array($command)
             ? new Process($command, $path, $environment)
             : Process::fromShellCommandline($command, $path, $environment);
 
         $process->setTimeout(null);
-        $process->run();
+
+        if ($run === null) {
+            $process->run();
+
+            return $process;
+        }
+
+        $process->start();
+
+        while ($process->isRunning()) {
+            if ($this->stopRequested($run)) {
+                $process->stop(1);
+
+                break;
+            }
+
+            usleep(250000);
+        }
+
+        $process->wait();
 
         return $process;
+    }
+
+    private function throwIfStopRequested(TaskRun $run): void
+    {
+        $run->refresh();
+
+        if (! $run->stopRequested()) {
+            return;
+        }
+
+        throw new Exception($run->stopRequestMessage());
+    }
+
+    private function stopRequested(TaskRun $run): bool
+    {
+        $freshRun = TaskRun::query()->find($run->id);
+
+        return $freshRun?->stopRequested() ?? false;
     }
 }

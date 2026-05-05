@@ -18,6 +18,7 @@ use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Auth\Middleware\Authenticate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Mockery\MockInterface;
 use Symfony\Component\Process\Process;
 
@@ -108,6 +109,67 @@ test('reject marks task rejected and dispatches the next task without a project'
         ->finished_at->not->toBeNull();
 
     Queue::assertPushed(DispatchNextTaskRunJob::class);
+});
+
+test('stop marks queued task runs failed and dispatches the next task', function () {
+    Queue::fake();
+
+    $task = Task::create([
+        'title' => 'Queued stop',
+        'description' => 'Queued runs should stop immediately.',
+        'status' => Task::STATUS_RUNNING,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_QUEUED,
+        'branch_name' => 'ai-task-'.$task->id.'-queued-stop',
+        'workspace_path' => '/tmp/task-fox',
+        'base_branch' => 'main',
+    ]);
+    $run->initializeWorkflowState($task);
+
+    $this->post(route('tasks.stop', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasNoErrors();
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
+        ->and($run->last_error)->toBe('Task run stopped by user.')
+        ->and($run->finished_at)->not->toBeNull()
+        ->and($run->stopRequested())->toBeTrue();
+
+    Queue::assertPushed(DispatchNextTaskRunJob::class);
+});
+
+test('stop requests interruption for active executing task runs', function () {
+    Queue::fake();
+
+    $task = Task::create([
+        'title' => 'Interrupt active run',
+        'description' => 'Executing runs should be asked to stop.',
+        'status' => Task::STATUS_RUNNING,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_IMPLEMENTING,
+        'branch_name' => 'ai-task-'.$task->id.'-interrupt-active-run',
+        'workspace_path' => '/tmp/task-fox',
+        'base_branch' => 'main',
+    ]);
+    $run->initializeWorkflowState($task);
+    $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+
+    $this->post(route('tasks.stop', $task))
+        ->assertRedirect(route('tasks.index', ['task' => $task->id]))
+        ->assertSessionHasNoErrors();
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_IMPLEMENTING)
+        ->and($run->finished_at)->toBeNull()
+        ->and($run->stopRequested())->toBeTrue()
+        ->and($run->stopRequestMessage())->toBe('Task run stopped by user.');
 });
 
 test('failed tasks can be retried and queued for execution', function () {
@@ -908,12 +970,53 @@ test('codex review command uses native base branch review mode', function () {
         ->and($command)->not->toContain('Return exactly one JSON object with this shape:');
 });
 
-test('codex review classifier treats no blocking issues as passing', function () {
+test('codex review classifier uses the codex verdict instead of keyword matching', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-review-classifier-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-review-classifier-bin-'.uniqid();
+    $argsPath = $workspacePath.'/args.txt';
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/codex',
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > ".escapeshellarg($argsPath)."\nprintf '{\"pass\":false}\n'\n"
+    );
+    chmod($binPath.'/codex', 0755);
+
+    $task = Task::create([
+        'title' => 'Review classifier override',
+        'description' => 'Review classification should come from Codex.',
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        'branch_name' => 'task/review-classifier-override',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'main',
+    ]);
+
     $reflection = new ReflectionClass(CodexCodingAgent::class);
     $method = $reflection->getMethod('reviewTextHasFindings');
 
-    expect($method->invoke(new CodexCodingAgent, 'There are no blocking issues in scope of this patch.'))
-        ->toBeFalse();
+    $result = $method->invoke(
+        new CodexCodingAgent([
+            'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+        ]),
+        $run,
+        'There are no blocking issues in scope of this patch.',
+    );
+
+    $args = file($argsPath, FILE_IGNORE_NEW_LINES);
+    $capturedPrompt = (string) file_get_contents($argsPath);
+
+    expect($result)->toBeTrue()
+        ->and($args)->toContain('exec')
+        ->and($args)->toContain('--sandbox')
+        ->and($args[array_search('--sandbox', $args, true) + 1])->toBe('read-only')
+        ->and($args)->toContain('--ephemeral')
+        ->and($capturedPrompt)->toContain('Classify this code review output.');
 });
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
@@ -1349,7 +1452,7 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
                 ->once()
                 ->andReturnUsing(function () use (&$events, $run): CodingAgentResult {
                     $events[] = 'screenshot';
-                    file_put_contents(storage_path("app/task-runs/{$run->id}/screenshots/implementation.png"), 'png');
+                    file_put_contents($run->screenshotPath(), 'png');
 
                     return new CodingAgentResult(successful: true, messages: ['screenshot captured']);
                 });
@@ -1475,6 +1578,46 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
         ->review_attempt_count->toBe(2)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+});
+
+test('RunApprovedTaskWithCodingAgentJob stops when a stop request is present before execution', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Stop before execution');
+    $run = createAutomationRun($task, $repositoryPath, 'task/stop-before-execution');
+    $run->requestStop(null, 'Task run stopped by user.');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')->never();
+            $mock->shouldReceive('run')->never();
+            $mock->shouldReceive('reviewChanges')->never();
+            $mock->shouldReceive('fixReviewFindings')->never();
+            $mock->shouldReceive('generateCommitMessage')->never();
+        })
+    );
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
+        ->and($run->last_error)->toBe('Task run stopped by user.')
+        ->and($run->logs()->where('message', 'Task run stopped')->exists())->toBeTrue();
 });
 
 test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', function () {
@@ -2070,15 +2213,15 @@ test('fresh repository preparation discards dirty work and recreates task branch
 
     test()->instance(
         CodingAgent::class,
-        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath, $task): void {
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath, $run, $task): void {
             $mock->shouldReceive('plan')
                 ->once()
-                ->andReturnUsing(function () use ($repositoryPath, $task): CodingAgentResult {
+                ->andReturnUsing(function () use ($repositoryPath, $run, $task): CodingAgentResult {
                     expect(file_get_contents($repositoryPath.'/README.md'))->toBe("Review test\n")
                         ->and(file_exists($repositoryPath.'/untracked.txt'))->toBeFalse()
                         ->and(file_get_contents($repositoryPath.'/base.txt'))->toBe("Latest base\n")
                         ->and(trim(runSuccessfulProcessWithOutput(['git', 'branch', '--show-current'], $repositoryPath)))
-                        ->toBe('ai-task-'.$task->id.'-fresh-preparation');
+                        ->toBe(expectedGeneratedBranchName($run, $task));
 
                     return new CodingAgentResult(successful: true, payload: ['plan' => 'Verify fresh preparation.']);
                 });
@@ -2098,7 +2241,7 @@ test('fresh repository preparation discards dirty work and recreates task branch
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
     $baseCommit = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', 'main'], $repositoryPath));
-    $branchParent = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', 'ai-task-'.$task->id.'-fresh-preparation~0'], $repositoryPath));
+    $branchParent = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', expectedGeneratedBranchName($run, $task).'~0'], $repositoryPath));
 
     expect($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_REPOSITORY_PREPARED))->toBeTrue()
         ->and($branchParent)->toBe($baseCommit);
@@ -2582,6 +2725,18 @@ function createAutomationRun(Task $task, string $repositoryPath, string $branchN
         'workspace_path' => $repositoryPath,
         'base_branch' => 'main',
     ]);
+}
+
+function expectedGeneratedBranchName(TaskRun $run, Task $task): string
+{
+    $slug = Str::limit(Str::slug((string) $task->title), 40, '');
+    $suffix = ($run->created_at ?? now())->format('YmdHis');
+
+    if ($slug === '') {
+        $slug = 'task';
+    }
+
+    return 'ai-task-'.$task->id.'-'.$slug.'-'.$suffix;
 }
 
 function createCleanGitRepository(): string

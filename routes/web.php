@@ -35,6 +35,7 @@ Route::middleware(['auth', 'enabled'])->group(function (): void {
     Route::patch('/tasks/{task}', [TaskController::class, 'update'])->name('tasks.update');
     Route::post('/tasks/{task}/submit-for-approval', [TaskController::class, 'submitForApproval'])->name('tasks.submit-for-approval');
     Route::post('/tasks/{task}/approve', [TaskController::class, 'approve'])->name('tasks.approve');
+    Route::post('/tasks/{task}/stop', [TaskController::class, 'stop'])->name('tasks.stop');
     Route::post('/tasks/{task}/reject', [TaskController::class, 'reject'])->name('tasks.reject');
     Route::post('/tasks/{task}/retry', [TaskController::class, 'retry'])->name('tasks.retry');
     Route::post('/tasks/{task}/rerun-workflow', [TaskController::class, 'rerunWorkflow'])->name('tasks.rerun-workflow');

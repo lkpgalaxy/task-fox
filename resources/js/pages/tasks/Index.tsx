@@ -62,6 +62,9 @@ type RunLog = {
 
 type WorkflowState = {
     request_hash?: string;
+    stop_requested_at?: string | null;
+    stop_requested_by_user_id?: number | null;
+    stop_requested_reason?: string | null;
     checkpoints?: WorkflowCheckpoint[];
 };
 
@@ -197,6 +200,19 @@ const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
 const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
 const projectRequiredMessage = 'Assign a project before approving this task.';
+
+const stoppableTaskRunStatuses = [
+    'queued',
+    'preparing',
+    'planning',
+    'implementing',
+    'testing',
+    'screenshotting',
+    'reviewing_changes',
+    'generating_commit_message',
+    'committing_changes',
+    'creating_pr',
+] as const;
 
 const formatUser = (
     user: Pick<User, 'name' | 'github_username'> | null | undefined,
@@ -452,6 +468,17 @@ export default function TasksIndex() {
         );
     };
 
+    const submitStopRun = (taskId: number) => {
+        router.post(
+            tasks.stop.url(taskId),
+            {},
+            {
+                preserveScroll: true,
+                onSuccess: () => openTaskDetails(taskId),
+            },
+        );
+    };
+
     const submitRetry = (taskId: number) => {
         router.post(
             tasks.retry.url(taskId),
@@ -659,6 +686,7 @@ export default function TasksIndex() {
                                 submitForApproval(selectedTask.id)
                             }
                             onApprove={() => submitApprove(selectedTask.id)}
+                            onStopRun={() => submitStopRun(selectedTask.id)}
                             onReject={() => submitReject(selectedTask.id)}
                             onRetry={() => submitRetry(selectedTask.id)}
                             onRerunWorkflow={() =>
@@ -781,6 +809,7 @@ function TaskDetails({
     onEdit,
     onSubmitForApproval,
     onApprove,
+    onStopRun,
     onReject,
     onRetry,
     onRerunWorkflow,
@@ -790,6 +819,7 @@ function TaskDetails({
     onEdit: () => void;
     onSubmitForApproval: () => void;
     onApprove: () => void;
+    onStopRun: () => void;
     onReject: () => void;
     onRetry: () => void;
     onRerunWorkflow: () => void;
@@ -807,6 +837,14 @@ function TaskDetails({
     });
     const latestRun = taskRuns[0] ?? null;
     const latestWorkflow = latestRun?.workflow_state ?? null;
+    const latestRunStopRequested = Boolean(latestWorkflow?.stop_requested_at);
+    const latestRunCanBeStopped =
+        latestRun !== null &&
+        stoppableTaskRunStatuses.includes(
+            latestRun.status as (typeof stoppableTaskRunStatuses)[number],
+        );
+    const latestRunIsStopping =
+        latestRunCanBeStopped && latestRunStopRequested;
     const latestCheckpoints = latestWorkflow?.checkpoints ?? [];
     const currentCheckpoint = workflowCurrentCheckpoint(latestCheckpoints);
     const completedCheckpoints =
@@ -832,6 +870,7 @@ function TaskDetails({
                             Run {taskStatusLabel(task.latest_task_run.status)}
                         </Badge>
                     ) : null}
+                    {latestRunIsStopping ? <Badge>Stop requested</Badge> : null}
                 </div>
                 <div>
                     <p className="text-sm leading-6 text-ink-muted">
@@ -864,6 +903,18 @@ function TaskDetails({
                             onClick={onApprove}
                         >
                             Approve
+                        </Button>
+                    ) : null}
+                    {latestRunCanBeStopped ? (
+                        <Button
+                            type="button"
+                            variant="danger"
+                            disabled={latestRunIsStopping}
+                            onClick={onStopRun}
+                        >
+                            {latestRunIsStopping
+                                ? 'Stopping run...'
+                                : 'Stop run'}
                         </Button>
                     ) : null}
                     {task.status !== 'done' ? (

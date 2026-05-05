@@ -155,7 +155,10 @@ class TaskController extends Controller
                     'task_runs.workflow_state',
                 ]),
                 'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,analyze_source_model,analyze_source_reasoning_effort,plan_model,plan_reasoning_effort,implement_model,implement_reasoning_effort,review_model,review_reasoning_effort,commit_message_model,commit_message_reasoning_effort,updated_at',
-                'taskRuns.logs:id,task_run_id,level,message,context,created_at',
+                'taskRuns.logs' => fn ($query) => $query
+                    ->select(['id', 'task_run_id', 'level', 'message', 'context', 'created_at'])
+                    ->orderByDesc('created_at')
+                    ->orderByDesc('id'),
                 'externalTaskLink.messages:id,external_task_link_id,type,status,error,sent_at,payload',
             ])
             ->find($request->integer('task'));
@@ -352,13 +355,12 @@ class TaskController extends Controller
             'approved_by_user_id' => null,
         ]);
 
-        $task->taskRuns()
-            ->whereIn('status', TaskRun::ACTIVE_STATUSES)
-            ->update([
-                'status' => TaskRun::STATUS_REJECTED,
-                'last_error' => 'Task rejected.',
-                'finished_at' => now(),
-            ]);
+        $this->stopActiveTaskRuns(
+            $task->taskRuns()->whereIn('status', TaskRun::ACTIVE_STATUSES)->get(),
+            TaskRun::STATUS_REJECTED,
+            'Task rejected.',
+            $actor->id,
+        );
 
         if ($task->externalTaskLink) {
             $this->recordExternalMessage(
@@ -375,6 +377,45 @@ class TaskController extends Controller
         return redirect()
             ->route('tasks.index')
             ->with('status', 'Task rejected.');
+    }
+
+    public function stop(Task $task): RedirectResponse
+    {
+        $actor = $this->resolveCurrentUser();
+
+        if ($actor === null) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['actor' => 'No actor available to record the stop request.']);
+        }
+
+        $activeRuns = $task->taskRuns()
+            ->whereIn('status', TaskRun::ACTIVE_STATUSES)
+            ->get();
+
+        if ($activeRuns->isEmpty()) {
+            return redirect()
+                ->route('tasks.index', ['task' => $task->id])
+                ->withErrors(['stop' => 'No active task run is available to stop.']);
+        }
+
+        $task->update([
+            'status' => Task::STATUS_FAILED,
+            'rejected_at' => null,
+        ]);
+
+        $this->stopActiveTaskRuns(
+            $activeRuns,
+            TaskRun::STATUS_FAILED,
+            'Task run stopped by user.',
+            $actor->id,
+        );
+
+        DispatchNextTaskRunJob::dispatch();
+
+        return redirect()
+            ->route('tasks.index', ['task' => $task->id])
+            ->with('status', 'Task run stop requested.');
     }
 
     public function retry(Task $task): RedirectResponse
@@ -427,6 +468,7 @@ class TaskController extends Controller
             'last_error' => null,
             'finished_at' => null,
         ]);
+        $run->clearStopRequest();
 
         if ($task->externalTaskLink) {
             $this->recordExternalMessage(
@@ -637,6 +679,43 @@ class TaskController extends Controller
         }
 
         return false;
+    }
+
+    /**
+     * @param  Collection<int, TaskRun>  $runs
+     */
+    private function stopActiveTaskRuns(
+        Collection $runs,
+        string $finalRunStatus,
+        string $message,
+        int $requestedByUserId,
+    ): void {
+        $runs->each(function (TaskRun $run) use ($finalRunStatus, $message, $requestedByUserId): void {
+            if ($run->isExecutionActive()) {
+                $run->requestStop($requestedByUserId, $message);
+
+                $this->recordTaskRunLog($run, 'warning', 'Task run stop requested', [
+                    'requested_by_user_id' => $requestedByUserId,
+                    'final_status' => $finalRunStatus,
+                    'message' => $message,
+                ]);
+
+                return;
+            }
+
+            $run->update([
+                'status' => $finalRunStatus,
+                'last_error' => $message,
+                'finished_at' => now(),
+            ]);
+            $run->requestStop($requestedByUserId, $message);
+
+            $this->recordTaskRunLog($run, 'warning', 'Task run stopped', [
+                'requested_by_user_id' => $requestedByUserId,
+                'final_status' => $finalRunStatus,
+                'message' => $message,
+            ]);
+        });
     }
 
     private function serializeTask(Task $task, bool $withDetails = false): array
