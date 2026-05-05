@@ -811,9 +811,64 @@ test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git co
 
     $commit = trim(runSuccessfulProcessWithOutput(['git', 'log', '-1', '--pretty=%s'], $repositoryPath));
     $author = trim(runSuccessfulProcessWithOutput(['git', 'log', '-1', '--pretty=%an <%ae>'], $repositoryPath));
+    $localCommit = trim(runSuccessfulProcessWithOutput(['git', 'rev-parse', 'task/generated-commit-message'], $repositoryPath));
+    $remoteBranch = trim(runSuccessfulProcessWithOutput(['git', 'ls-remote', 'origin', 'refs/heads/task/generated-commit-message'], $repositoryPath));
 
     expect($commit)->toBe('feat: use generated subject')
-        ->and($author)->toBe('agent-login <agent@example.com>');
+        ->and($author)->toBe('agent-login <agent@example.com>')
+        ->and($remoteBranch)->toStartWith($localCommit);
+});
+
+test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when branch push fails', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    runSuccessfulProcess(['git', 'remote', 'remove', 'origin'], $repositoryPath);
+
+    $task = createApprovedAutomationTask($repositoryPath, 'Push failure before PR');
+    $run = createAutomationRun($task, $repositoryPath, 'task/push-failure-before-pr');
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($repositoryPath): void {
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturnUsing(function () use ($repositoryPath): CodingAgentResult {
+                    file_put_contents($repositoryPath.'/push-failure.txt', "Cannot push\n");
+
+                    return new CodingAgentResult(successful: true);
+                });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: push failure']));
+        })
+    );
+    test()->instance(
+        ExternalTaskProvider::class,
+        Mockery::mock(ExternalTaskProvider::class)
+    );
+    test()->instance(
+        PullRequestProvider::class,
+        Mockery::mock(PullRequestProvider::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('createPullRequest')->never();
+            $mock->shouldReceive('requestReview')->never();
+            $mock->shouldReceive('getReviewState')->never();
+        })
+    );
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    $run->refresh();
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->status)->toBe(AiRun::STATUS_FAILED)
+        ->and($run->last_error)->toStartWith('Unable to push committed changes:')
+        ->and($run->checkpoint(AiRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(AiRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(AiRun::CHECKPOINT_PULL_REQUEST_CREATED)['status'])->toBe(AiRun::CHECKPOINT_STATUS_PENDING);
 });
 
 test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint', function () {
@@ -1210,14 +1265,19 @@ function createAutomationRun(Task $task, string $repositoryPath, string $branchN
 function createCleanGitRepository(): string
 {
     $repositoryPath = sys_get_temp_dir().'/task-fox-review-repo-'.uniqid();
+    $originPath = sys_get_temp_dir().'/task-fox-review-origin-'.uniqid();
 
     mkdir($repositoryPath);
+    mkdir($originPath);
+    runSuccessfulProcess(['git', 'init', '--bare'], $originPath);
     runSuccessfulProcess(['git', 'init', '-b', 'main'], $repositoryPath);
     runSuccessfulProcess(['git', 'config', 'user.email', 'tests@example.com'], $repositoryPath);
     runSuccessfulProcess(['git', 'config', 'user.name', 'Task Fox Tests'], $repositoryPath);
     file_put_contents($repositoryPath.'/README.md', "Review test\n");
     runSuccessfulProcess(['git', 'add', 'README.md'], $repositoryPath);
     runSuccessfulProcess(['git', 'commit', '-m', 'Initial commit'], $repositoryPath);
+    runSuccessfulProcess(['git', 'remote', 'add', 'origin', $originPath], $repositoryPath);
+    runSuccessfulProcess(['git', 'push', '-u', 'origin', 'main'], $repositoryPath);
 
     return $repositoryPath;
 }

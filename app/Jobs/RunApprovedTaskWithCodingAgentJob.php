@@ -73,7 +73,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     AiRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
                     AiRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
                     AiRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run),
-                    AiRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath),
+                    AiRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     AiRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
                     AiRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
                     AiRun::CHECKPOINT_EXTERNAL_TASK_UPDATED => $this->updateExternalTask($externalTaskProvider, $task, $run),
@@ -336,12 +336,18 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         throw new Exception('Coding agent review failed after retry limit reached.');
     }
 
-    private function commitChanges(CodingAgent $codingAgent, Task $task, AiRun $run, string $repositoryPath): void
-    {
+    private function commitChanges(
+        CodingAgent $codingAgent,
+        Task $task,
+        AiRun $run,
+        string $repositoryPath,
+        string $branchName,
+    ): void {
         $run->markCheckpointRunning(AiRun::CHECKPOINT_CHANGES_COMMITTED);
 
         $commitMessage = $this->generateCommitMessage($codingAgent, $task, $run);
         $this->commitPendingChanges($repositoryPath, $commitMessage, $task->assignee);
+        $this->pushBranch($repositoryPath, $branchName);
 
         $run->markCheckpointCompleted(AiRun::CHECKPOINT_CHANGES_COMMITTED);
     }
@@ -404,6 +410,14 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         );
         if (! $commit->isSuccessful()) {
             throw new Exception('Unable to commit changes: '.trim((string) $commit->getErrorOutput()));
+        }
+    }
+
+    private function pushBranch(string $path, string $branchName): void
+    {
+        $push = $this->runProcess(['git', 'push', '-u', 'origin', $branchName], $path);
+        if (! $push->isSuccessful()) {
+            throw new Exception('Unable to push committed changes: '.trim((string) $push->getErrorOutput()));
         }
     }
 
