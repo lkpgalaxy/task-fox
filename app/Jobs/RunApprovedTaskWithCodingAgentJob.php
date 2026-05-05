@@ -162,7 +162,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_PLANNED);
         $run->update(['status' => TaskRun::STATUS_PLANNING]);
 
-        $this->log($run, 'info', 'Coding agent planning started');
+        $this->log($run, 'info', 'Coding agent planning started', $this->agentLogContext($run, 'plan'));
 
         $agentResult = $codingAgent->plan($task, $run);
         $this->logAgentMessages($run, $agentResult);
@@ -197,9 +197,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED),
             ]);
 
-            $this->log($run, 'info', 'Coding agent invocation started', [
-                'attempt' => $attempt,
-            ]);
+            $this->log($run, 'info', 'Coding agent invocation started', array_merge(
+                $this->agentLogContext($run, 'implement'),
+                ['attempt' => $attempt],
+            ));
 
             $agentResult = $codingAgent->run($task, $run);
             $this->logAgentMessages($run, $agentResult);
@@ -391,9 +392,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'review_attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_CHANGES_REVIEWED),
             ]);
 
-            $this->log($run, 'info', 'Coding agent review started', [
-                'attempt' => $attempt,
-            ]);
+            $this->log($run, 'info', 'Coding agent review started', array_merge(
+                $this->agentLogContext($run, 'review'),
+                ['attempt' => $attempt],
+            ));
 
             $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
             $this->logAgentMessages($run, $agentResult);
@@ -425,9 +427,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'error' => $agentResult->error,
             ]);
 
-            $this->log($run, 'info', 'Coding agent review fix started', [
-                'attempt' => $attempt,
-            ]);
+            $this->log($run, 'info', 'Coding agent review fix started', array_merge(
+                $this->agentLogContext($run, 'review_fix'),
+                ['attempt' => $attempt],
+            ));
 
             $fixResult = $codingAgent->fixReviewFindings($task, $run, $reviewFeedback, $attempt);
             $this->logAgentMessages($run, $fixResult);
@@ -468,7 +471,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     {
         $run->update(['status' => TaskRun::STATUS_GENERATING_COMMIT_MESSAGE]);
 
-        $this->log($run, 'info', 'Coding agent commit message generation started');
+        $this->log($run, 'info', 'Coding agent commit message generation started', $this->agentLogContext($run, 'commit_message'));
 
         $agentResult = $codingAgent->generateCommitMessage($task, $run);
         $this->logAgentMessages($run, $agentResult);
@@ -664,9 +667,50 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function logAgentMessages(TaskRun $run, CodingAgentResult $agentResult): void
     {
-        foreach ($agentResult->messages as $message) {
-            $this->log($run, 'info', 'Coding agent output', ['message' => $message]);
+        if ($agentResult->messages === [] && $agentResult->context !== []) {
+            $this->log($run, 'info', 'Coding agent output', array_merge(
+                $agentResult->context,
+                ['message' => 'Coding agent command invoked.'],
+            ));
         }
+
+        foreach ($agentResult->messages as $message) {
+            $this->log($run, 'info', 'Coding agent output', array_merge(
+                $agentResult->context,
+                ['message' => $message],
+            ));
+        }
+    }
+
+    /**
+     * @return array{agent_phase: string, agent_model: string|null, agent_reasoning_effort: string|null}
+     */
+    private function agentLogContext(TaskRun $run, string $phase): array
+    {
+        [$model, $reasoningEffort] = match ($phase) {
+            'plan' => [$run->plan_model, $run->plan_reasoning_effort],
+            'implement', 'review_fix' => [$run->implement_model, $run->implement_reasoning_effort],
+            'review' => [$run->review_model, $run->review_reasoning_effort],
+            'commit_message' => [$run->commit_message_model, $run->commit_message_reasoning_effort],
+            default => [null, null],
+        };
+
+        return [
+            'agent_phase' => $phase,
+            'agent_model' => $this->nullableAgentSetting($model),
+            'agent_reasoning_effort' => $this->nullableAgentSetting($reasoningEffort),
+        ];
+    }
+
+    private function nullableAgentSetting(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
     }
 
     private function buildReviewFeedback(CodingAgentResult $agentResult): string

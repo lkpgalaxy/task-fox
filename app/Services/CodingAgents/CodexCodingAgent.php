@@ -63,7 +63,7 @@ class CodexCodingAgent implements CodingAgent
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message);
+            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
         }
 
         $messages = array_values(
@@ -77,6 +77,7 @@ class CodexCodingAgent implements CodingAgent
         return new CodingAgentResult(
             successful: true,
             messages: $messages,
+            context: $this->commandLogContext($command),
         );
     }
 
@@ -85,12 +86,14 @@ class CodexCodingAgent implements CodingAgent
         $prompt = $this->buildPlanningPrompt($task, $run);
         $repositoryPath = $this->resolveWorkspacePath($run);
 
-        $process = new Process($this->buildPlanningCommand(
+        $command = $this->buildPlanningCommand(
             $run,
             $prompt,
             $this->resolveRunSetting($run, 'plan_model'),
             $this->resolveRunSetting($run, 'plan_reasoning_effort'),
-        ), $repositoryPath);
+        );
+
+        $process = new Process($command, $repositoryPath);
         $process->setTimeout(null);
         $process->setEnv(array_merge(
             $this->context,
@@ -108,7 +111,7 @@ class CodexCodingAgent implements CodingAgent
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent planning command failed.';
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message);
+            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
         }
 
         $plan = $this->extractProposedPlan($output);
@@ -118,6 +121,7 @@ class CodexCodingAgent implements CodingAgent
                 successful: false,
                 messages: $output !== '' ? ["Output: {$output}"] : [],
                 error: 'Coding agent did not return an implementation plan.',
+                context: $this->commandLogContext($command),
             );
         }
 
@@ -131,6 +135,7 @@ class CodexCodingAgent implements CodingAgent
                 ], static fn (?string $message) => $message !== null),
             ),
             payload: ['plan' => $plan],
+            context: $this->commandLogContext($command),
         );
     }
 
@@ -147,15 +152,17 @@ class CodexCodingAgent implements CodingAgent
         }
 
         try {
+            $command = $this->buildReviewCommand(
+                $task,
+                $run,
+                $attempt,
+                $outputPath,
+                $this->resolveRunSetting($run, 'review_model'),
+                $this->resolveRunSetting($run, 'review_reasoning_effort'),
+            );
+
             $process = new Process(
-                $this->buildReviewCommand(
-                    $task,
-                    $run,
-                    $attempt,
-                    $outputPath,
-                    $this->resolveRunSetting($run, 'review_model'),
-                    $this->resolveRunSetting($run, 'review_reasoning_effort'),
-                ),
+                $command,
                 $repositoryPath,
             );
             $process->setTimeout(null);
@@ -194,6 +201,7 @@ class CodexCodingAgent implements CodingAgent
                         'stdout' => $stdout,
                         'stderr' => $stderr,
                     ],
+                    context: $this->commandLogContext($command),
                 );
             }
 
@@ -206,6 +214,7 @@ class CodexCodingAgent implements CodingAgent
                     successful: true,
                     messages: $messages,
                     payload: $payload,
+                    context: $this->commandLogContext($command),
                 );
             }
 
@@ -217,6 +226,7 @@ class CodexCodingAgent implements CodingAgent
                 ], static fn (?string $message): bool => $message !== null)),
                 error: $overallExplanation !== '' ? $overallExplanation : 'Coding agent review reported findings.',
                 payload: $payload,
+                context: $this->commandLogContext($command),
             );
         } finally {
             if (is_file($outputPath)) {
@@ -616,7 +626,13 @@ Rules:
 PROMPT;
 
         $repositoryPath = (string) base_path();
-        $process = new Process($this->buildAnalyzeCommand($repositoryPath, $prompt, $this->resolveAnalyzeSourceModel(), $this->resolveAnalyzeSourceReasoningEffort()), $repositoryPath !== '' ? $repositoryPath : null);
+        $command = $this->buildAnalyzeCommand(
+            $repositoryPath,
+            $prompt,
+            $this->resolveAnalyzeSourceModel(),
+            $this->resolveAnalyzeSourceReasoningEffort(),
+        );
+        $process = new Process($command, $repositoryPath !== '' ? $repositoryPath : null);
         $process->setTimeout(null);
         $process->setEnv($this->context);
         $process->run();
@@ -627,7 +643,7 @@ PROMPT;
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent analysis command failed.';
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message);
+            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
         }
 
         try {
@@ -637,6 +653,7 @@ PROMPT;
                 successful: false,
                 messages: $output !== '' ? ["Output: {$output}"] : [],
                 error: 'Coding agent returned invalid task JSON: '.$exception->getMessage(),
+                context: $this->commandLogContext($command),
             );
         }
 
@@ -649,6 +666,7 @@ PROMPT;
                 ], static fn (?string $message) => $message !== null),
             ),
             payload: $payload,
+            context: $this->commandLogContext($command),
         );
     }
 
@@ -764,7 +782,7 @@ PAYLOAD;
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message);
+            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
         }
 
         return new CodingAgentResult(
@@ -776,7 +794,24 @@ PAYLOAD;
                     $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
                 ], static fn (?string $message) => $message !== null),
             ),
+            context: $this->commandLogContext($command),
         );
+    }
+
+    /**
+     * @param  list<string>  $command
+     * @return array{command: list<string>}
+     */
+    private function commandLogContext(array $command): array
+    {
+        return [
+            'command' => array_map(
+                static fn (string $argument): string => str_contains($argument, "\n") || mb_strlen($argument) > 500
+                    ? '[prompt omitted]'
+                    : $argument,
+                $command,
+            ),
+        ];
     }
 
     /**

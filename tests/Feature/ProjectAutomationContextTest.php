@@ -759,6 +759,8 @@ test('codex coding agent uses the run workspace as codex workspace and process c
     $args = file($argsPath, FILE_IGNORE_NEW_LINES);
 
     expect($result->successful)->toBeTrue()
+        ->and($result->context['command'])->toContain('exec')
+        ->and($result->context['command'])->toContain('[prompt omitted]')
         ->and(trim((string) file_get_contents($cwdPath)))->toBe($workspacePath)
         ->and($args)->toContain('exec')
         ->and($args)->toContain('--model')
@@ -1236,6 +1238,104 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
         ->review_attempt_count->toBe(2)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+});
+
+test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', function () {
+    Queue::fake();
+    config(['automation.tests.command' => 'true']);
+
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Agent model logs');
+    $run = createAutomationRun($task, $repositoryPath, 'task/agent-model-logs');
+    $run->update([
+        'plan_model' => 'gpt-plan',
+        'plan_reasoning_effort' => 'low',
+        'implement_model' => 'gpt-implement',
+        'implement_reasoning_effort' => 'medium',
+        'review_model' => 'gpt-review',
+        'review_reasoning_effort' => 'high',
+        'commit_message_model' => 'gpt-commit',
+        'commit_message_reasoning_effort' => null,
+    ]);
+
+    test()->instance(
+        CodingAgent::class,
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('plan')
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: true,
+                    messages: ['Coding agent planning command completed.'],
+                    payload: ['plan' => 'Log every agent phase.'],
+                    context: ['command' => ['codex', 'exec', '[prompt omitted]']],
+                ));
+            $mock->shouldReceive('run')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->twice()
+                ->andReturn(
+                    new CodingAgentResult(
+                        successful: false,
+                        messages: ['review output'],
+                        error: 'Needs fixes.',
+                        payload: ['findings' => [['title' => '[P2] Missing test']]],
+                    ),
+                    new CodingAgentResult(successful: true),
+                );
+            $mock->shouldReceive('fixReviewFindings')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, messages: ['applied fix']));
+            $mock->shouldReceive('generateCommitMessage')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: log agent metadata']));
+        })
+    );
+    bindSuccessfulAuxiliaryMocks();
+
+    app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
+
+    $logs = TaskRunLog::query()
+        ->where('task_run_id', $run->id)
+        ->whereIn('message', [
+            'Coding agent planning started',
+            'Coding agent invocation started',
+            'Coding agent review started',
+            'Coding agent review fix started',
+            'Coding agent commit message generation started',
+        ])
+        ->orderBy('id')
+        ->get();
+
+    $logsByMessage = $logs->groupBy('message');
+
+    $expectAgentContext = function (array $context, string $phase, ?string $model, ?string $reasoningEffort): void {
+        expect($context)->toMatchArray([
+            'coding_agent' => 'codex',
+            'agent_phase' => $phase,
+            'agent_model' => $model,
+            'agent_reasoning_effort' => $reasoningEffort,
+        ]);
+    };
+
+    expect($logs)->toHaveCount(6);
+
+    $expectAgentContext($logsByMessage->get('Coding agent planning started')->sole()->context, 'plan', 'gpt-plan', 'low');
+    $expectAgentContext($logsByMessage->get('Coding agent invocation started')->sole()->context, 'implement', 'gpt-implement', 'medium');
+    $logsByMessage->get('Coding agent review started')->each(
+        fn (TaskRunLog $log) => $expectAgentContext($log->context, 'review', 'gpt-review', 'high'),
+    );
+    $expectAgentContext($logsByMessage->get('Coding agent review fix started')->sole()->context, 'review_fix', 'gpt-implement', 'medium');
+    $expectAgentContext($logsByMessage->get('Coding agent commit message generation started')->sole()->context, 'commit_message', 'gpt-commit', null);
+
+    expect(TaskRunLog::query()
+        ->where('task_run_id', $run->id)
+        ->where('message', 'Coding agent output')
+        ->where('context->message', 'Coding agent planning command completed.')
+        ->sole()
+        ->context)->toMatchArray([
+            'command' => ['codex', 'exec', '[prompt omitted]'],
+        ]);
 });
 
 test('RunApprovedTaskWithCodingAgentJob fails after the final review attempt without fixing', function () {
