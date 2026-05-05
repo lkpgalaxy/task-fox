@@ -289,8 +289,7 @@ export default function TasksIndex() {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [showEditModal, setShowEditModal] = useState(false);
     const [showPrIdentityModal, setShowPrIdentityModal] = useState(false);
-    const [showRerunWorkflowModal, setShowRerunWorkflowModal] =
-        useState(false);
+    const [showRerunWorkflowModal, setShowRerunWorkflowModal] = useState(false);
     const [rerunWorkflowTaskId, setRerunWorkflowTaskId] = useState<
         number | null
     >(null);
@@ -615,21 +614,6 @@ export default function TasksIndex() {
         setDismissedPrIdentityError(true);
     };
 
-    const submitRefreshPr = (taskId: number) => {
-        router.post(
-            tasks.refreshPr.url(taskId),
-            {},
-            {
-                preserveScroll: true,
-                onSuccess: () => {
-                    if (selectedTask) {
-                        openTaskDetails(taskId);
-                    }
-                },
-            },
-        );
-    };
-
     return (
         <AppShell
             title="Task Board"
@@ -791,9 +775,6 @@ export default function TasksIndex() {
                                 openRerunWorkflowModal(selectedTask.id)
                             }
                             onCreatePr={() => submitCreatePr(selectedTask.id)}
-                            onRefreshPr={() =>
-                                submitRefreshPr(selectedTask.id)
-                            }
                         />
                     </>
                 ) : null}
@@ -923,7 +904,6 @@ function TaskDetails({
     onRetry,
     onRerunWorkflow,
     onCreatePr,
-    onRefreshPr,
 }: {
     task: TaskRecord;
     onEdit: () => void;
@@ -933,7 +913,6 @@ function TaskDetails({
     onRetry: () => void;
     onRerunWorkflow: () => void;
     onCreatePr: () => void;
-    onRefreshPr: () => void;
 }) {
     const latestPullRequestRun = task.latest_pull_request_run;
     const canAttemptPrCreation =
@@ -1043,11 +1022,6 @@ function TaskDetails({
                             onClick={onRerunWorkflow}
                         >
                             Rerun workflow
-                        </Button>
-                    ) : null}
-                    {latestPullRequestRun ? (
-                        <Button type="button" onClick={onRefreshPr}>
-                            Refresh PR
                         </Button>
                     ) : null}
                     {canAttemptPrCreation ? (

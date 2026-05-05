@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
-use App\Enums\PullRequestReviewState;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Jobs\DispatchNextTaskRunJob;
@@ -14,6 +13,7 @@ use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
 use App\Models\User;
+use App\Services\PullRequests\PullRequestStatusRefresher;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -29,6 +29,7 @@ class TaskController extends Controller
     public function __construct(
         private readonly ExternalTaskProvider $externalTaskProvider,
         private readonly PullRequestProvider $pullRequestProvider,
+        private readonly PullRequestStatusRefresher $pullRequestStatusRefresher,
     ) {}
 
     public function index(Request $request): Response
@@ -605,21 +606,12 @@ class TaskController extends Controller
 
     public function refreshPr(Task $task): RedirectResponse
     {
-        $task->loadMissing('latestPullRequestRun');
-        $run = $task->latestPullRequestRun;
-
-        if (! $run || ! $run->pull_request_url) {
+        try {
+            $state = $this->pullRequestStatusRefresher->refresh($task);
+        } catch (Throwable $exception) {
             return redirect()
                 ->route('tasks.index', ['task' => $task->id])
-                ->withErrors(['pull_request' => 'No pull request URL available for this task.']);
-        }
-
-        $state = $this->pullRequestProvider->getReviewState($run->pull_request_url);
-
-        if ($state === PullRequestReviewState::MERGED) {
-            $task->update(['status' => Task::STATUS_DONE]);
-
-            $run->update(['status' => TaskRun::STATUS_DONE, 'finished_at' => now()]);
+                ->withErrors(['pull_request' => $exception->getMessage()]);
         }
 
         return redirect()
