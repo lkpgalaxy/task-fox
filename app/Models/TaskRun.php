@@ -35,6 +35,8 @@ class TaskRun extends Model
 
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
 
+    public const CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED = 'acceptance_criteria_verified';
+
     public const CHECKPOINT_CHANGES_COMMITTED = 'changes_committed';
 
     public const CHECKPOINT_PULL_REQUEST_CREATED = 'pull_request_created';
@@ -95,6 +97,7 @@ class TaskRun extends Model
         self::CHECKPOINT_PLANNED,
         self::CHECKPOINT_IMPLEMENTATION_VERIFIED,
         self::CHECKPOINT_CHANGES_REVIEWED,
+        self::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         self::CHECKPOINT_CHANGES_COMMITTED,
         self::CHECKPOINT_PULL_REQUEST_CREATED,
         self::CHECKPOINT_REVIEW_REQUESTED,
@@ -133,26 +136,31 @@ class TaskRun extends Model
 
     public function initializeWorkflowState(Task $task): void
     {
-        if (is_array($this->workflow_state)) {
-            return;
-        }
+        $state = is_array($this->workflow_state) ? $this->workflow_state : [];
 
-        $this->forceFill([
-            'workflow_state' => [
-                'request_hash' => self::requestHashForTask($task),
-                'checkpoints' => collect(self::WORKFLOW_CHECKPOINTS)
-                    ->map(fn (string $checkpoint): array => [
+        $existingCheckpoints = collect(Arr::get($state, 'checkpoints', []))
+            ->filter(fn (mixed $checkpoint): bool => is_array($checkpoint) && is_string($checkpoint['name'] ?? null))
+            ->keyBy(fn (array $checkpoint): string => (string) $checkpoint['name']);
+
+        $state['request_hash'] ??= self::requestHashForTask($task);
+        $state['checkpoints'] = collect(self::WORKFLOW_CHECKPOINTS)
+            ->map(function (string $checkpoint) use ($existingCheckpoints): array {
+                return $existingCheckpoints->get(
+                    $checkpoint,
+                    [
                         'name' => $checkpoint,
                         'status' => self::CHECKPOINT_STATUS_PENDING,
                         'attempts' => 0,
                         'completed_at' => null,
                         'failed_at' => null,
                         'error' => null,
-                    ])
-                    ->values()
-                    ->all(),
-            ],
-        ])->save();
+                    ],
+                );
+            })
+            ->values()
+            ->all();
+
+        $this->forceFill(['workflow_state' => $state])->save();
     }
 
     public function hasMatchingRequestHash(Task $task): bool

@@ -75,6 +75,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run),
+                    TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED => $this->verifyAcceptanceCriteria($task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     TaskRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
                     TaskRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
@@ -207,7 +208,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             }
 
             if ($this->runTests($repositoryPath, $run)) {
-                $this->markAcceptanceCriteriaVerified($task, $run);
                 $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
 
                 return;
@@ -236,6 +236,15 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
             $run->update(['status' => TaskRun::STATUS_PLANNING]);
         }
+    }
+
+    private function verifyAcceptanceCriteria(Task $task, TaskRun $run): void
+    {
+        $run->markCheckpointRunning(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED);
+
+        $this->markAcceptanceCriteriaVerified($task, $run);
+
+        $run->markCheckpointCompleted(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED);
     }
 
     private function resolvePullRequestReviewer(Task $task): ?User

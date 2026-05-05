@@ -823,7 +823,7 @@ test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempt
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
 });
 
-test('RunApprovedTaskWithCodingAgentJob reviews after tests pass and before pull request creation', function () {
+test('RunApprovedTaskWithCodingAgentJob reviews and verifies acceptance criteria before commit', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
 
@@ -870,8 +870,34 @@ test('RunApprovedTaskWithCodingAgentJob reviews after tests pass and before pull
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
+    $logMessages = TaskRunLog::query()
+        ->where('task_run_id', $run->id)
+        ->orderBy('id')
+        ->pluck('message')
+        ->all();
+
     expect($events)->toBe(['planning', 'implementation', 'review', 'commit-message', 'pull-request'])
-        ->and($run->refresh()->plan)->toBe('Implement before review.');
+        ->and($run->refresh()->plan)->toBe('Implement before review.')
+        ->and($task->refresh()->acceptance_criteria)->toBe([
+            ['body' => 'Automation completes.', 'checked' => true],
+        ])
+        ->and(collect($run->workflowCheckpoints())->pluck('name')->all())->toBe([
+            TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
+            TaskRun::CHECKPOINT_PLANNED,
+            TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
+            TaskRun::CHECKPOINT_CHANGES_REVIEWED,
+            TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
+            TaskRun::CHECKPOINT_CHANGES_COMMITTED,
+            TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
+            TaskRun::CHECKPOINT_REVIEW_REQUESTED,
+            TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED,
+        ])
+        ->and(array_search('Coding agent review passed', $logMessages, true))->toBeLessThan(
+            array_search('Acceptance criteria verified', $logMessages, true),
+        )
+        ->and(array_search('Acceptance criteria verified', $logMessages, true))->toBeLessThan(
+            array_search('Coding agent commit message generation started', $logMessages, true),
+        );
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops review retries after success', function () {
@@ -1072,11 +1098,19 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+    $run->forceFill([
+        'workflow_state' => array_merge($run->workflow_state, [
+            'checkpoints' => collect($run->workflowCheckpoints())
+                ->reject(fn (array $checkpoint): bool => $checkpoint['name'] === TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED)
+                ->values()
+                ->all(),
+        ]),
+    ])->save();
     $run->update(['status' => TaskRun::STATUS_FAILED]);
 
     test()->instance(
         CodingAgent::class,
-        Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($task, $run): void {
             $mock->shouldReceive('plan')->never();
             $mock->shouldReceive('run')->never();
             $mock->shouldReceive('reviewChanges')
@@ -1084,7 +1118,14 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
-                ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: resume from review']));
+                ->andReturnUsing(function () use ($task, $run): CodingAgentResult {
+                    expect($task->refresh()->acceptance_criteria)->toBe([
+                        ['body' => 'Automation completes.', 'checked' => true],
+                    ])
+                        ->and($run->refresh()->isCheckpointComplete(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED))->toBeTrue();
+
+                    return new CodingAgentResult(successful: true, payload: ['message' => 'test: resume from review']);
+                });
         })
     );
     bindSuccessfulAuxiliaryMocks();
@@ -1095,7 +1136,8 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->attempt_count->toBe(0)
         ->review_attempt_count->toBe(1)
-        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue();
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue()
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED))->toBeTrue();
 });
 
 test('task run retries the failed checkpoint before the next pending checkpoint', function () {
@@ -1145,6 +1187,7 @@ test('task run workflow initializes planning before implementation verification'
         TaskRun::CHECKPOINT_PLANNED,
         TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_REVIEWED,
+        TaskRun::CHECKPOINT_ACCEPTANCE_CRITERIA_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_COMMITTED,
         TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
         TaskRun::CHECKPOINT_REVIEW_REQUESTED,
