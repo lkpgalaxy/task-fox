@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests;
 
+use App\Services\Automation\AgentDriverFactory;
+use App\Services\Automation\ExternalTaskProviderFactory;
 use App\Services\SystemSettingsResolver;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -22,6 +24,9 @@ class UpdateAutomationSettingsRequest extends FormRequest
             'commit_message_model' => $this->normalizeModelInput('commit_message_model'),
             'commit_message_reasoning_effort' => $this->normalizeModelInput('commit_message_reasoning_effort'),
             'retry_limit' => $this->normalizeRetryLimitInput(),
+            'agent_driver' => $this->normalizeModelInput('agent_driver'),
+            'coding_agent_driver' => $this->normalizeModelInput('coding_agent_driver'),
+            'external_task_provider' => $this->normalizeModelInput('external_task_provider'),
         ]);
     }
 
@@ -36,6 +41,9 @@ class UpdateAutomationSettingsRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'agent_driver' => ['nullable', 'string', Rule::in(array_keys(app(AgentDriverFactory::class)->agentDrivers()))],
+            'coding_agent_driver' => ['nullable', 'string', Rule::in(array_keys(app(AgentDriverFactory::class)->codingAgentDrivers()))],
+            'external_task_provider' => ['nullable', 'string', Rule::in(array_keys(app(ExternalTaskProviderFactory::class)->options()))],
             'analyze_source_model' => ['nullable', 'string', 'max:255'],
             'analyze_source_reasoning_effort' => ['nullable', 'string', Rule::in(SystemSettingsResolver::REASONING_EFFORTS)],
             'plan_model' => ['nullable', 'string', 'max:255'],

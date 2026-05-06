@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Task;
 use App\Models\TaskRun;
+use App\Services\SystemSettingsResolver;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
@@ -18,7 +19,7 @@ class DispatchNextTaskRunJob implements ShouldQueue
 
     public function __construct(public ?int $taskId = null) {}
 
-    public function handle(): void
+    public function handle(SystemSettingsResolver $settingsResolver): void
     {
         $lock = Cache::lock('automation:dispatch-next-task-run', 10);
 
@@ -59,7 +60,7 @@ class DispatchNextTaskRunJob implements ShouldQueue
                 return;
             }
 
-            $task->loadMissing('project:id,workspace_path,base_branch');
+            $task->loadMissing('project:id,workspace_path,base_branch', 'approvedByUser:id,automation_coding_agent_driver');
 
             $task->update(['status' => Task::STATUS_RUNNING]);
 
@@ -97,6 +98,7 @@ class DispatchNextTaskRunJob implements ShouldQueue
                 'branch_name' => 'pending',
                 'workspace_path' => $workspacePath,
                 'base_branch' => $baseBranch,
+                'coding_agent_driver' => $settingsResolver->effectiveCodingAgentDriver($task->approvedByUser),
             ]);
             $run->initializeWorkflowState($task);
 

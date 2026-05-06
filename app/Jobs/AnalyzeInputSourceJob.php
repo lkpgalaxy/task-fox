@@ -34,6 +34,10 @@ class AnalyzeInputSourceJob implements ShouldQueue
             return;
         }
 
+        $agentDriver = is_string($inputSource->agent_driver) && trim($inputSource->agent_driver) !== ''
+            ? trim($inputSource->agent_driver)
+            : $settingsResolver->effectiveAgentDriver();
+
         $analyzeSourceModel = $settingsResolver->analyzeSourceModel();
         $analyzeSourceReasoningEffort = $settingsResolver->analyzeSourceReasoningEffort();
 
@@ -55,7 +59,7 @@ class AnalyzeInputSourceJob implements ShouldQueue
                 ->values()
                 ->toArray();
 
-            $extractedItems = $extractor->extract($inputSource, $projects);
+            $extractedItems = $extractor->extract($inputSource, $projects, $agentDriver);
             $items = $this->normalizeExtractedItems($extractedItems);
             $validProjectIds = Project::query()->pluck('id')->all();
 
@@ -158,7 +162,9 @@ class AnalyzeInputSourceJob implements ShouldQueue
             'level' => $level,
             'message' => $message,
             'context' => array_merge([
-                'agent' => (string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex')),
+                'agent' => is_string($inputSource->agent_driver) && trim($inputSource->agent_driver) !== ''
+                    ? trim($inputSource->agent_driver)
+                    : (string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex')),
                 'input_source_id' => $inputSource->id,
                 'input_source_title' => $inputSource->title,
                 'analysis_status' => $inputSource->analysis_status,

@@ -3,6 +3,14 @@
 use App\Services\PullRequests\GithubPullRequestProvider;
 
 return [
+    'supported_agent_drivers' => [
+        'codex' => 'Codex',
+    ],
+
+    'supported_coding_agent_drivers' => [
+        'codex' => 'Codex',
+    ],
+
     'coding_agent' => [
         'driver' => env('CODING_AGENT', 'codex'),
     ],
@@ -12,11 +20,14 @@ return [
         'retry_limit' => (int) env('AGENT_RETRY_LIMIT', 3),
     ],
 
-    'tests' => [
-        'command' => env('TEST_COMMAND', 'php artisan test --compact'),
-    ],
-
     'external_task_provider' => env('EXTERNAL_TASK_PROVIDER'),
+
+    'external_task_providers' => [
+        // 'linear' => [
+        //     'label' => 'Linear',
+        //     'class' => \App\Services\ExternalTaskProviders\LinearExternalTaskProvider::class,
+        // ],
+    ],
 
     'pull_request_provider' => GithubPullRequestProvider::class,
 ];

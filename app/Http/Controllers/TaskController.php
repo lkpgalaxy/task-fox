@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
@@ -13,7 +12,9 @@ use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
 use App\Models\User;
+use App\Services\Automation\ExternalTaskProviderFactory;
 use App\Services\PullRequests\PullRequestStatusRefresher;
+use App\Services\SystemSettingsResolver;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -27,9 +28,10 @@ use Throwable;
 class TaskController extends Controller
 {
     public function __construct(
-        private readonly ExternalTaskProvider $externalTaskProvider,
+        private readonly ExternalTaskProviderFactory $externalTaskProviderFactory,
         private readonly PullRequestProvider $pullRequestProvider,
         private readonly PullRequestStatusRefresher $pullRequestStatusRefresher,
+        private readonly SystemSettingsResolver $settingsResolver,
     ) {}
 
     public function index(Request $request): Response
@@ -292,15 +294,16 @@ class TaskController extends Controller
             'rejected_at' => null,
         ]);
 
-        if (! empty(config('automation.external_task_provider'))) {
+        $providerKey = $this->settingsResolver->effectiveExternalTaskProvider($actor);
+
+        if ($providerKey !== null && $providerKey !== '' && ! $task->externalTaskLink) {
             try {
-                $result = $this->externalTaskProvider->createTask($task);
+                $result = $this->externalTaskProviderFactory->make($providerKey)->createTask($task);
 
                 if ($result->handled) {
-                    $link = $task->externalTaskLink()->updateOrCreate(
-                        ['task_id' => $task->id],
+                    $link = $task->externalTaskLink()->create(
                         [
-                            'external_task_provider' => $result->provider ?? 'unknown',
+                            'external_task_provider' => $result->provider ?? $providerKey,
                             'external_task_id' => $result->externalTaskId,
                             'external_url' => $result->externalUrl,
                         ],
@@ -530,6 +533,7 @@ class TaskController extends Controller
             'branch_name' => 'pending',
             'workspace_path' => (string) $task->project->workspace_path,
             'base_branch' => $baseBranch,
+            'coding_agent_driver' => $this->settingsResolver->effectiveCodingAgentDriver($actor),
         ]);
         $run->initializeWorkflowState($task);
 
@@ -621,7 +625,9 @@ class TaskController extends Controller
                     null,
                 );
 
-                $this->externalTaskProvider->attachPullRequest($task->externalTaskLink, $pr->url);
+                $this->externalTaskProviderFactory
+                    ->make($task->externalTaskLink->external_task_provider)
+                    ->attachPullRequest($task->externalTaskLink, $pr->url);
             }
 
             $this->recordTaskRunLog($run, 'info', 'Pull request created manually', [

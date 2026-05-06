@@ -60,7 +60,7 @@ test('task details return run logs in latest-first order', function () {
     ]);
     TaskRunPhaseSession::create([
         'task_run_id' => $run->id,
-        'phase' => TaskRunPhaseSession::PHASE_TEST,
+        'phase' => TaskRunPhaseSession::PHASE_REVIEW,
         'status' => TaskRunPhaseSession::STATUS_COMPLETED,
         'attempt_count' => 1,
     ]);

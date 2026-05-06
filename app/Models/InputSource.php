@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
     'title',
+    'agent_driver',
     'filename',
     'file_disk',
     'file_path',

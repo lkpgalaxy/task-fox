@@ -12,6 +12,8 @@ use App\Models\TaskRun;
 use App\Models\TaskRunLog;
 use App\Models\TaskRunPhaseSession;
 use App\Models\User;
+use App\Services\Automation\AgentDriverFactory;
+use App\Services\Automation\ExternalTaskProviderFactory;
 use App\Services\Automation\TaskRunPhaseSessionRecorder;
 use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -32,8 +34,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     public function __construct(public int $taskRunId) {}
 
     public function handle(
-        CodingAgent $codingAgent,
-        ExternalTaskProvider $externalTaskProvider,
+        AgentDriverFactory $agentDriverFactory,
+        ExternalTaskProviderFactory $externalTaskProviderFactory,
         PullRequestProvider $pullRequestProvider,
     ): void {
         $run = TaskRun::with(['task.assignee', 'task.reviewer', 'task.approvedByUser', 'task.externalTaskLink', 'task.project.defaultReviewer'])->find($this->taskRunId);
@@ -43,6 +45,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         $task = $run->task;
+        $codingAgent = $agentDriverFactory->makeCodingAgent($this->codingAgentDriver($run));
         $repositoryPath = $this->resolveExecutionPath($run);
         $branchName = $this->resolveBranchName($run, $task);
         $baseBranch = $this->resolveBaseBranch($run);
@@ -81,12 +84,12 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_IMPLEMENTATION => $this->implementChanges($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run, $repositoryPath),
-                    TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED => $this->verifyPostReviewChanges($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
+                    TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED => $this->verifyUrlSmoke($codingAgent, $externalTaskProviderFactory, $task, $run),
                     TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED => $this->verifyScreenshot($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     TaskRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
                     TaskRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
-                    TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED => $this->updateExternalTask($externalTaskProvider, $task, $run),
+                    TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED => $this->updateExternalTask($externalTaskProviderFactory, $task, $run),
                     default => throw new Exception("Unknown task run checkpoint [{$checkpoint}]."),
                 };
 
@@ -340,47 +343,18 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
     }
 
-    private function verifyPostReviewChanges(
+    private function verifyUrlSmoke(
         CodingAgent $codingAgent,
-        ExternalTaskProvider $externalTaskProvider,
+        ExternalTaskProviderFactory $externalTaskProviderFactory,
         Task $task,
         TaskRun $run,
-        string $repositoryPath,
     ): void {
         $retryLimit = $this->retryLimit($run);
 
         for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
             $this->throwIfStopRequested($run);
 
-            $run->markCheckpointRunning(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED);
-
-            if (! $this->runTests($repositoryPath, $run)) {
-                $testFailure = trim((string) $run->refresh()->last_error);
-
-                if (! $this->allowsRetry($attempt, $retryLimit)) {
-                    throw new Exception($testFailure !== ''
-                        ? "Tests failed after retry limit reached.\n\n{$testFailure}"
-                        : 'Tests failed after retry limit reached.');
-                }
-
-                $this->log($run, 'warning', 'Post-review verification failed; retrying', [
-                    'attempt' => $attempt,
-                    'max_attempts' => $this->retryLimitLabel($retryLimit),
-                    'phase' => 'test',
-                ]);
-
-                $this->resumeImplementationAfterVerificationFailure(
-                    $codingAgent,
-                    $externalTaskProvider,
-                    $task,
-                    $run,
-                    $attempt,
-                    $testFailure,
-                    'Tests failed, scheduling retry.',
-                );
-
-                continue;
-            }
+            $run->markCheckpointRunning(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED);
 
             try {
                 $this->verifyProjectUrl($codingAgent, $task, $run);
@@ -391,7 +365,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
                 $failure = $exception->getMessage();
 
-                $this->log($run, 'warning', 'Post-review verification failed; retrying', [
+                $this->log($run, 'warning', 'URL smoke verification failed; retrying', [
                     'attempt' => $attempt,
                     'max_attempts' => $this->retryLimitLabel($retryLimit),
                     'phase' => 'url_smoke',
@@ -402,7 +376,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
                 $this->resumeImplementationAfterVerificationFailure(
                     $codingAgent,
-                    $externalTaskProvider,
+                    $externalTaskProviderFactory,
                     $task,
                     $run,
                     $attempt,
@@ -413,7 +387,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 continue;
             }
 
-            $run->markCheckpointCompleted(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED);
+            $run->markCheckpointCompleted(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED);
 
             return;
         }
@@ -421,7 +395,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function resumeImplementationAfterVerificationFailure(
         CodingAgent $codingAgent,
-        ExternalTaskProvider $externalTaskProvider,
+        ExternalTaskProviderFactory $externalTaskProviderFactory,
         Task $task,
         TaskRun $run,
         int $attempt,
@@ -437,7 +411,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'sent_at' => now(),
             ]);
 
-            $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed post-review verification; retrying ({$attempt}/{$this->retryLimitLabel($this->retryLimit($run))}).");
+            $this->externalTaskProvider($externalTaskProviderFactory, $task->externalTaskLink->external_task_provider)
+                ->addComment($task->externalTaskLink, "Run {$run->id} failed URL smoke verification; retrying ({$attempt}/{$this->retryLimitLabel($this->retryLimit($run))}).");
         }
 
         $run->update([
@@ -472,7 +447,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $reviewResult = $codingAgent->resumeReview(
             $task,
             $run,
-            "Implementation changes were updated to address this post-review verification failure:\n\n{$feedback}\n\nRe-review the latest diff and changed tests before verification is rerun.",
+            "Implementation changes were updated to address this URL smoke verification failure:\n\n{$feedback}\n\nRe-review the latest diff and changed tests before verification is rerun.",
             $attempt + 1,
         );
         $this->mergeAgentCommandContext($reviewLog, $reviewResult);
@@ -571,79 +546,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         if (! $result->isSuccessful()) {
             throw new Exception('Unable to checkout existing task branch: '.trim((string) $result->getErrorOutput()));
         }
-    }
-
-    private function runTests(string $path, TaskRun $run): bool
-    {
-        $this->throwIfStopRequested($run);
-
-        $command = (string) config('automation.tests.command', 'php artisan test --compact');
-        $process = $this->runProcess($command, $path, [], $run);
-        $this->throwIfStopRequested($run);
-        $failureOutput = $this->formatTestFailure($command, $process);
-
-        $run->update(['status' => TaskRun::STATUS_TESTING]);
-        $this->phaseSessionRecorder()->recordTestResult(
-            $run,
-            $command,
-            $process->isSuccessful(),
-            $process->isSuccessful() ? null : $failureOutput,
-        );
-
-        $this->log($run, 'info', 'Test command executed', [
-            'command' => $command,
-            'exit_code' => $process->getExitCode(),
-            'stdout' => $this->limitProcessOutput($process->getOutput()),
-            'stderr' => $this->limitProcessOutput($process->getErrorOutput()),
-        ]);
-
-        if ($process->isSuccessful()) {
-            $run->update(['last_error' => null]);
-
-            return true;
-        }
-
-        $run->update(['last_error' => $failureOutput]);
-
-        return false;
-    }
-
-    private function formatTestFailure(string $command, Process $process): string
-    {
-        $combinedOutput = trim($process->getOutput()."\n".$process->getErrorOutput());
-        $failingTests = $this->extractFailingTestNames($combinedOutput);
-        $sections = [
-            'Test failure summary for implementation retry:',
-            "Test command: {$command}",
-            $failingTests !== []
-                ? 'Failing tests: '.implode(', ', $failingTests)
-                : 'Concise failure summary: test command failed without a parsed test name.',
-            "Verification command failed: {$command}",
-            'Exit code: '.(string) $process->getExitCode(),
-        ];
-
-        $output = trim($process->getOutput());
-        if ($output !== '') {
-            $sections[] = "STDOUT:\n".$this->limitProcessOutput($output, 8000);
-        }
-
-        $errorOutput = trim($process->getErrorOutput());
-        if ($errorOutput !== '') {
-            $sections[] = "STDERR:\n".$this->limitProcessOutput($errorOutput, 8000);
-        }
-
-        return implode("\n\n", $sections);
-    }
-
-    private function limitProcessOutput(string $output, int $limit = 6000): string
-    {
-        $output = trim($output);
-
-        if (Str::length($output) <= $limit) {
-            return $output;
-        }
-
-        return Str::substr($output, 0, $limit)."\n\n[truncated]";
     }
 
     private function screenshotPath(TaskRun $run): string
@@ -977,7 +879,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         ]);
     }
 
-    private function updateExternalTask(ExternalTaskProvider $externalTaskProvider, Task $task, TaskRun $run): void
+    private function updateExternalTask(ExternalTaskProviderFactory $externalTaskProviderFactory, Task $task, TaskRun $run): void
     {
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED);
 
@@ -995,7 +897,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             'sent_at' => now(),
         ]);
 
-        $externalTaskProvider->attachPullRequest($task->externalTaskLink, $run->pull_request_url);
+        $this->externalTaskProvider($externalTaskProviderFactory, $task->externalTaskLink->external_task_provider)
+            ->attachPullRequest($task->externalTaskLink, $run->pull_request_url);
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_EXTERNAL_TASK_UPDATED);
     }
 
@@ -1023,7 +926,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             'level' => $level,
             'message' => $message,
             'context' => array_merge([
-                'coding_agent' => (string) config('automation.coding_agent.driver', 'codex'),
+                'coding_agent' => $this->codingAgentDriver($run),
             ], $context),
         ]);
     }
@@ -1136,7 +1039,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $phase = match ($run->status) {
             TaskRun::STATUS_PLANNING => TaskRunPhaseSession::PHASE_PLAN,
             TaskRun::STATUS_IMPLEMENTING => TaskRunPhaseSession::PHASE_IMPLEMENT,
-            TaskRun::STATUS_TESTING => TaskRunPhaseSession::PHASE_TEST,
             TaskRun::STATUS_REVIEWING_CHANGES => TaskRunPhaseSession::PHASE_REVIEW,
             default => null,
         };
@@ -1167,19 +1069,16 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         );
     }
 
-    /**
-     * @return list<string>
-     */
-    private function extractFailingTestNames(string $output): array
+    private function codingAgentDriver(TaskRun $run): string
     {
-        preg_match_all('/(?:FAIL|FAILED)\s+([A-Za-z0-9_\\\\:>\-\s\(\)\[\]\.]+)/', $output, $matches);
+        $driver = trim((string) $run->coding_agent_driver);
 
-        return collect($matches[1] ?? [])
-            ->map(fn (string $name): string => trim($name))
-            ->filter()
-            ->unique()
-            ->values()
-            ->all();
+        return $driver === '' ? 'codex' : $driver;
+    }
+
+    private function externalTaskProvider(ExternalTaskProviderFactory $factory, ?string $provider): ExternalTaskProvider
+    {
+        return $factory->make($provider);
     }
 
     private function resolveBaseBranch(TaskRun $run): string

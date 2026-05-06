@@ -35,8 +35,6 @@ class TaskRunPhaseSession extends Model
 
     public const PHASE_IMPLEMENT = 'implement';
 
-    public const PHASE_TEST = 'test';
-
     public const PHASE_REVIEW = 'review';
 
     public const STATUS_PENDING = 'pending';
@@ -50,7 +48,6 @@ class TaskRunPhaseSession extends Model
     public const PHASES = [
         self::PHASE_PLAN,
         self::PHASE_IMPLEMENT,
-        self::PHASE_TEST,
         self::PHASE_REVIEW,
     ];
 

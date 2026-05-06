@@ -23,6 +23,7 @@ Route::middleware(['auth', 'enabled'])->group(function (): void {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::patch('/profile/automation', [ProfileController::class, 'updateAutomationSettings'])->name('profile.automation.update');
+    Route::patch('/profile/automation/preferences', [ProfileController::class, 'updateAutomationPreferences'])->name('profile.automation.preferences.update');
     Route::patch('/profile/password', [ProfileController::class, 'updatePassword'])->name('profile.password.update');
 
     Route::get('/projects', [ProjectController::class, 'index'])->name('projects.index');

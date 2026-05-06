@@ -725,8 +725,6 @@ test('task run snapshot defaults blank project base branch to main', function ()
 
 test('failed approved task keeps approval audit fields', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
     $repositoryPath = createCleanGitRepository();
     $approver = User::factory()->create();
     $project = Project::create([
@@ -1022,7 +1020,6 @@ test('codex review classifier uses the codex verdict instead of keyword matching
 
 test('pull request review is requested from the project default reviewer before the task assignee', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $assignee = User::factory()->create(['github_username' => 'assignee-login']);
@@ -1060,7 +1057,6 @@ test('pull request review is requested from the project default reviewer before 
 
 test('pull request review is skipped when the reviewer resolves to the pull request author', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $assignee = User::factory()->create(['github_username' => 'assignee-login']);
@@ -1103,7 +1099,6 @@ test('pull request review is skipped when the reviewer resolves to the pull requ
 
 test('pull request review is skipped when the reviewer resolves to the approving user', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     runSuccessfulProcess(['git', 'checkout', '-b', 'task/resume-reviewed-pr'], $repositoryPath);
@@ -1148,7 +1143,6 @@ test('pull request review is skipped when the reviewer resolves to the approving
 
 test('pull request review uses task reviewer before project default reviewer', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $taskReviewer = User::factory()->create(['github_username' => 'task-reviewer']);
@@ -1183,7 +1177,6 @@ test('pull request review uses task reviewer before project default reviewer', f
 
 test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempts separately', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Separate attempts');
@@ -1217,16 +1210,13 @@ test('RunApprovedTaskWithCodingAgentJob counts implementation and review attempt
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
 });
 
-test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retry diagnosis', function () {
+test('RunApprovedTaskWithCodingAgentJob stores failed URL smoke output for agent retry diagnosis', function () {
     Queue::fake();
-    config([
-        'automation.agent.retry_limit' => 1,
-        'automation.tests.command' => 'php -r \'fwrite(STDERR, "SQLSTATE[HY000]: General error: 1 no such table: sessions\n"); exit(2);\'',
-    ]);
+    config(['automation.agent.retry_limit' => 1]);
 
     $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Store failed test output');
-    $run = createAutomationRun($task, $repositoryPath, 'task/store-failed-test-output');
+    $task = createApprovedAutomationTask($repositoryPath, 'Store failed URL smoke output', null, 'https://app.test');
+    $run = createAutomationRun($task, $repositoryPath, 'task/store-failed-url-smoke-output');
     $run->update(['retry_limit' => 1]);
 
     test()->instance(
@@ -1241,6 +1231,9 @@ test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retr
             $mock->shouldReceive('reviewChanges')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('smokeTestUrl')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: false, error: 'Smoke test found a database exception.'));
             $mock->shouldReceive('generateCommitMessage')->never();
         })
     );
@@ -1256,27 +1249,20 @@ test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retr
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
-    $testLogContext = $run->logs()->where('message', 'Test command executed')->first()?->context ?? [];
-
     expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
         ->and($run->refresh()->last_error)
-        ->toContain('Tests failed after retry limit reached.')
-        ->toContain('Verification command failed:')
-        ->toContain('Exit code: 2')
-        ->toContain('no such table: sessions')
-        ->and($testLogContext['stderr'] ?? '')
-        ->toContain('no such table: sessions');
+        ->toBe('Smoke test found a database exception.')
+        ->and($run->logs()->where('message', 'Test command executed')->exists())->toBeFalse();
 });
 
 test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit from task run snapshot', function () {
     Queue::fake();
 
     $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Finite implementation retry limit');
+    $task = createApprovedAutomationTask($repositoryPath, 'Finite implementation retry limit', null, 'https://app.test');
     $run = createAutomationRun($task, $repositoryPath, 'task/finite-implementation-retry-limit');
     $run->update(['retry_limit' => 2]);
-    $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1)]);
+    $smokeAttempts = 0;
 
     test()->instance(
         CodingAgent::class,
@@ -1293,7 +1279,19 @@ test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit f
             $mock->shouldReceive('reviewChanges')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('smokeTestUrl')
+                ->twice()
+                ->andReturnUsing(function () use (&$smokeAttempts): CodingAgentResult {
+                    $smokeAttempts++;
+
+                    return $smokeAttempts === 1
+                        ? new CodingAgentResult(successful: false, error: 'First URL smoke attempt failed.')
+                        : new CodingAgentResult(successful: true);
+                });
             $mock->shouldReceive('resumeReview')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('captureScreenshot')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
@@ -1309,24 +1307,21 @@ test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit f
         ->attempt_count->toBe(2)
         ->review_attempt_count->toBe(2)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2')
-        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(1)
-        ->and($run->phaseSessions()->where('phase', 'test')->value('attempt_count'))->toBe(2);
+        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(0);
 });
 
 test('RunApprovedTaskWithCodingAgentJob retries implementation without limit when snapshot retry limit is unlimited', function () {
     Queue::fake();
 
     $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Unlimited implementation retries');
+    $task = createApprovedAutomationTask($repositoryPath, 'Unlimited implementation retries', null, 'https://app.test');
     $run = createAutomationRun($task, $repositoryPath, 'task/unlimited-implementation-retries');
     $run->update(['retry_limit' => -1]);
-    $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1).' && false']);
+    $smokeAttempts = 0;
 
     test()->instance(
         CodingAgent::class,
-        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use ($testsCountPath): void {
+        Mockery::mock(CodingAgent::class, function (MockInterface $mock) use (&$smokeAttempts): void {
             $mock->shouldReceive('plan')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry until tests pass.']));
@@ -1335,18 +1330,24 @@ test('RunApprovedTaskWithCodingAgentJob retries implementation without limit whe
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('resumeImplementation')
                 ->twice()
-                ->andReturnUsing(function () use ($testsCountPath): CodingAgentResult {
-                    if (is_file($testsCountPath) && trim((string) file_get_contents($testsCountPath)) === '2') {
-                        config(['automation.tests.command' => 'true']);
-                    }
-
-                    return new CodingAgentResult(successful: true);
-                });
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('smokeTestUrl')
+                ->times(3)
+                ->andReturnUsing(function () use (&$smokeAttempts): CodingAgentResult {
+                    $smokeAttempts++;
+
+                    return $smokeAttempts < 3
+                        ? new CodingAgentResult(successful: false, error: 'URL smoke retry needed.')
+                        : new CodingAgentResult(successful: true);
+                });
             $mock->shouldReceive('resumeReview')
                 ->twice()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('captureScreenshot')
+                ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
@@ -1360,13 +1361,12 @@ test('RunApprovedTaskWithCodingAgentJob retries implementation without limit whe
     expect($run->refresh())
         ->attempt_count->toBe(3)
         ->review_attempt_count->toBe(3)
-        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
+        ->and($smokeAttempts)->toBe(3);
 });
 
 test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
     $events = [];
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Review before PR');
@@ -1423,7 +1423,7 @@ test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function
             TaskRun::CHECKPOINT_PLANNED,
             TaskRun::CHECKPOINT_IMPLEMENTATION,
             TaskRun::CHECKPOINT_CHANGES_REVIEWED,
-            TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED,
+            TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED,
             TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_COMMITTED,
             TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
@@ -1435,9 +1435,8 @@ test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function
         );
 });
 
-test('RunApprovedTaskWithCodingAgentJob captures screenshot after post-review verification when project URL is configured', function () {
+test('RunApprovedTaskWithCodingAgentJob captures screenshot after URL smoke verification when project URL is configured', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $events = [];
     $repositoryPath = createCleanGitRepository();
@@ -1497,15 +1496,14 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot after post-review ve
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
     expect($events)->toBe(['planning', 'implementation', 'review', 'url-smoke', 'screenshot', 'commit-message', 'pull-request'])
-        ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->logs()->where('message', 'URL smoke test passed')->exists())->toBeTrue()
         ->and($run->logs()->where('message', 'Screenshot captured')->exists())->toBeTrue();
 });
 
-test('RunApprovedTaskWithCodingAgentJob fails post-review verification when URL smoke test fails', function () {
+test('RunApprovedTaskWithCodingAgentJob fails URL smoke verification when URL smoke test fails', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'URL smoke failure', null, 'https://app.test');
@@ -1548,7 +1546,7 @@ test('RunApprovedTaskWithCodingAgentJob fails post-review verification when URL 
         ->and($run->last_error)->toBe('Page shows a database exception.')
         ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
@@ -1558,9 +1556,6 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Review retry success');
     $run = createAutomationRun($task, $repositoryPath, 'task/review-retry-success');
-    $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath)]);
-
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
@@ -1603,14 +1598,11 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
 
     expect($run->refresh())
         ->review_attempt_count->toBe(2)
-        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('1');
+        ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops when a stop request is present before execution', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Stop before execution');
     $run = createAutomationRun($task, $repositoryPath, 'task/stop-before-execution');
@@ -1649,8 +1641,6 @@ test('RunApprovedTaskWithCodingAgentJob stops when a stop request is present bef
 
 test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Agent model logs');
     $run = createAutomationRun($task, $repositoryPath, 'task/agent-model-logs');
@@ -1761,9 +1751,6 @@ test('RunApprovedTaskWithCodingAgentJob skips review after retry limit and conti
     $task = createApprovedAutomationTask($repositoryPath, 'Review failures continue');
     $run = createAutomationRun($task, $repositoryPath, 'task/review-failures-continue');
     $run->update(['retry_limit' => 1]);
-    $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath)]);
-
     test()->instance(
         CodingAgent::class,
         Mockery::mock(CodingAgent::class, function (MockInterface $mock): void {
@@ -1799,14 +1786,11 @@ test('RunApprovedTaskWithCodingAgentJob skips review after retry limit and conti
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->pull_request_url)->toBe('https://github.com/example/repo/pull/123')
         ->and($run->logs()->where('message', 'Coding agent review failed after retry limit')->exists())
-        ->toBeTrue()
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('1');
+        ->toBeTrue();
 });
 
 test('RunApprovedTaskWithCodingAgentJob fails when the review fixer fails before commit', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
-
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Fixer failure');
     $run = createAutomationRun($task, $repositoryPath, 'task/fixer-failure');
@@ -1856,14 +1840,13 @@ test('RunApprovedTaskWithCodingAgentJob fails when the review fixer fails before
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
-test('RunApprovedTaskWithCodingAgentJob reruns post-review verification in the same phase sessions after test failures', function () {
+test('RunApprovedTaskWithCodingAgentJob reruns URL smoke verification in the same phase sessions after URL failures', function () {
     Queue::fake();
 
     $repositoryPath = createCleanGitRepository();
-    $task = createApprovedAutomationTask($repositoryPath, 'Retry tests after fix');
-    $run = createAutomationRun($task, $repositoryPath, 'task/retry-tests-after-fix');
-    $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1)]);
+    $task = createApprovedAutomationTask($repositoryPath, 'Retry URL smoke after fix', null, 'https://app.test');
+    $run = createAutomationRun($task, $repositoryPath, 'task/retry-url-smoke-after-fix');
+    $smokeAttempts = 0;
 
     test()->instance(
         CodingAgent::class,
@@ -1883,10 +1866,22 @@ test('RunApprovedTaskWithCodingAgentJob reruns post-review verification in the s
                     successful: true,
                     invocation: new CodingAgentInvocation(sessionId: 'review-session'),
                 ));
+            $mock->shouldReceive('smokeTestUrl')
+                ->twice()
+                ->andReturnUsing(function () use (&$smokeAttempts): CodingAgentResult {
+                    $smokeAttempts++;
+
+                    return $smokeAttempts === 1
+                        ? new CodingAgentResult(successful: false, error: 'First URL smoke attempt failed.')
+                        : new CodingAgentResult(successful: true);
+                });
             $mock->shouldReceive('resumeImplementation')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('resumeReview')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('captureScreenshot')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
@@ -1904,21 +1899,18 @@ test('RunApprovedTaskWithCodingAgentJob reruns post-review verification in the s
         ->attempt_count->toBe(2)
         ->review_attempt_count->toBe(2)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
-        ->and($run->logs()->where('message', 'Post-review verification failed; retrying')->exists())->toBeTrue()
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2')
+        ->and($run->logs()->where('message', 'URL smoke verification failed; retrying')->exists())->toBeTrue()
         ->and($run->phaseSessions()->where('phase', 'implement')->value('session_id'))->toBe('implement-session')
         ->and($run->phaseSessions()->where('phase', 'implement')->value('attempt_count'))->toBe(2)
         ->and($run->phaseSessions()->where('phase', 'review')->value('session_id'))->toBe('review-session')
         ->and($run->phaseSessions()->where('phase', 'review')->value('attempt_count'))->toBe(2)
-        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(1)
-        ->and($run->phaseSessions()->where('phase', 'test')->value('attempt_count'))->toBe(2);
+        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(0);
 });
 
 test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git commit', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $assignee = User::factory()->create([
@@ -1965,7 +1957,6 @@ test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git co
 
 test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when branch push fails', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
 
@@ -2020,7 +2011,6 @@ test('RunApprovedTaskWithCodingAgentJob fails before pull request creation when 
 
 test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Resume from review');
@@ -2054,7 +2044,7 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
         ->attempt_count->toBe(0)
         ->review_attempt_count->toBe(1)
         ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue()
-        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED))->toBeTrue();
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED))->toBeTrue();
 });
 
 test('task run retries the failed checkpoint before the next pending checkpoint', function () {
@@ -2078,7 +2068,7 @@ test('task run retries the failed checkpoint before the next pending checkpoint'
         ->and($run->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
 });
 
-test('task run workflow initializes planning before review and post-review verification', function () {
+test('task run workflow initializes planning before review and URL smoke verification', function () {
     $task = Task::create([
         'title' => 'Plan before implementation',
         'description' => 'Planning should be an automatic checkpoint.',
@@ -2098,7 +2088,7 @@ test('task run workflow initializes planning before review and post-review verif
         TaskRun::CHECKPOINT_PLANNED,
         TaskRun::CHECKPOINT_IMPLEMENTATION,
         TaskRun::CHECKPOINT_CHANGES_REVIEWED,
-        TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED,
+        TaskRun::CHECKPOINT_URL_SMOKE_VERIFIED,
         TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_COMMITTED,
         TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
@@ -2170,7 +2160,6 @@ test('failed planning stores checkpoint failure and does not run implementation'
 
 test('repository checkpoint retry checks out existing ai branch without resetting work', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Preserve branch work');
@@ -2217,7 +2206,6 @@ test('repository checkpoint retry checks out existing ai branch without resettin
 
 test('fresh repository preparation discards dirty work and recreates task branch from updated base', function () {
     Queue::fake();
-    config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $originPath = trim(runSuccessfulProcessWithOutput(['git', 'remote', 'get-url', 'origin'], $repositoryPath));
@@ -2811,15 +2799,4 @@ function runSuccessfulProcessWithOutput(array $command, string $cwd): string
     }
 
     return (string) $process->getOutput();
-}
-
-function reviewCountingTestCommand(string $path, ?int $failOnInvocation = null): string
-{
-    $script = 'count=0; if [ -f '.escapeshellarg($path).' ]; then count=$(cat '.escapeshellarg($path).'); fi; count=$((count + 1)); printf %s "$count" > '.escapeshellarg($path).';';
-
-    if ($failOnInvocation !== null) {
-        $script .= ' if [ "$count" -eq '.(int) $failOnInvocation.' ]; then exit 1; fi;';
-    }
-
-    return 'sh -c '.escapeshellarg($script);
 }

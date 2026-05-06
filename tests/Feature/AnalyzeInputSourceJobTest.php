@@ -150,3 +150,60 @@ test('it uses the agent analysis to create pending approval tasks', function () 
         ])
         ->and($completedLog->context)->not->toHaveKey('coding_agent');
 });
+
+test('queued analysis keeps the uploader agent driver snapshot after settings change', function () {
+    config([
+        'automation.supported_agent_drivers' => [
+            'codex' => 'Codex',
+        ],
+    ]);
+
+    $source = InputSource::create([
+        'title' => 'Driver snapshot source',
+        'agent_driver' => 'codex',
+        'analysis_status' => 'pending',
+    ]);
+
+    SystemSetting::factory()->create([
+        'agent_driver' => null,
+        'analyze_source_model' => 'gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+    ]);
+
+    $agent = new class implements Agent
+    {
+        public function analyzeInputSource(InputSource $inputSource, array $projectSummaries): CodingAgentResult
+        {
+            return new CodingAgentResult(
+                successful: true,
+                payload: [
+                    'tasks' => [
+                        [
+                            'title' => 'Snapshot driver task',
+                            'description' => 'Created with the stored driver snapshot.',
+                            'project_id' => null,
+                            'assignee_github_username' => null,
+                            'priority' => 'medium',
+                            'deadline' => null,
+                            'questions' => [],
+                        ],
+                    ],
+                ],
+            );
+        }
+    };
+
+    $this->app->instance(Agent::class, $agent);
+
+    SystemSetting::query()->sole()->update(['agent_driver' => 'different-driver']);
+
+    app()->call([new AnalyzeInputSourceJob($source->id), 'handle']);
+
+    expect($source->refresh()->analysis_status)->toBe('completed')
+        ->and(TaskRunLog::query()
+            ->where('input_source_id', $source->id)
+            ->where('message', 'Input source analysis completed')
+            ->sole()
+            ->context['agent'])
+        ->toBe('codex');
+});

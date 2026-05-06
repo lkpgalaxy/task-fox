@@ -3,6 +3,7 @@
 use App\Contracts\Agent;
 use App\DataTransferObjects\CodingAgentResult;
 use App\Models\InputSource;
+use App\Services\Automation\AgentDriverFactory;
 use App\Services\Extraction\AgentTaskExtractor;
 
 test('it normalizes agent task analysis into extractor format', function () {
@@ -48,12 +49,14 @@ test('it normalizes agent task analysis into extractor format', function () {
         }
     };
 
-    $extractor = new AgentTaskExtractor($agent);
+    app()->instance(Agent::class, $agent);
+
+    $extractor = new AgentTaskExtractor(app(AgentDriverFactory::class));
     $projectSummaries = [
         ['id' => 12, 'name' => 'Task Fox'],
     ];
 
-    $tasks = $extractor->extract($inputSource, $projectSummaries);
+    $tasks = $extractor->extract($inputSource, $projectSummaries, 'codex');
 
     expect($tasks)->toHaveCount(2)
         ->and($agent->projectSummaries)->toBe($projectSummaries)

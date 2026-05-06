@@ -55,27 +55,6 @@ class TaskRunPhaseSessionRecorder
         return $session->refresh();
     }
 
-    /**
-     * @param  array<int, string>|string  $command
-     */
-    public function recordTestResult(TaskRun $run, array|string $command, bool $successful, ?string $lastError = null): TaskRunPhaseSession
-    {
-        $commandPayload = is_array($command) ? $command : ['shell' => $command];
-        $session = $this->phaseSession($run, TaskRunPhaseSession::PHASE_TEST);
-
-        $session->fill([
-            'status' => $successful ? TaskRunPhaseSession::STATUS_COMPLETED : TaskRunPhaseSession::STATUS_FAILED,
-            'attempt_count' => ((int) $session->attempt_count) + 1,
-            'command' => $commandPayload,
-            'started_at' => $session->started_at ?? now(),
-            'finished_at' => now(),
-            'last_error' => $successful ? null : $lastError,
-        ]);
-        $session->save();
-
-        return $session->refresh();
-    }
-
     public function markFailed(TaskRun $run, string $phase, string $error): TaskRunPhaseSession
     {
         $session = $this->phaseSession($run, $phase);

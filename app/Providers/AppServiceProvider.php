@@ -7,12 +7,13 @@ use App\Contracts\CodingAgent;
 use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
 use App\Contracts\TaskExtractor;
+use App\Services\Automation\AgentDriverFactory;
+use App\Services\Automation\ExternalTaskProviderFactory;
 use App\Services\CodingAgents\CodexCodingAgent;
 use App\Services\ExternalTaskProviders\NullExternalTaskProvider;
 use App\Services\Extraction\AgentTaskExtractor;
 use App\Services\PullRequests\GithubPullRequestProvider;
 use Carbon\CarbonImmutable;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -47,18 +48,10 @@ class AppServiceProvider extends ServiceProvider
     protected function registerDomainBindings(): void
     {
         $this->app->bind(TaskExtractor::class, AgentTaskExtractor::class);
-        $this->app->bind(Agent::class, function (): Agent {
-            return match ((string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex'))) {
-                'codex' => new CodexCodingAgent,
-                default => new CodexCodingAgent,
-            };
-        });
-        $this->app->bind(CodingAgent::class, function (): CodingAgent {
-            return match ((string) config('automation.agent.driver', config('automation.coding_agent.driver', 'codex'))) {
-                'codex' => new CodexCodingAgent,
-                default => new CodexCodingAgent,
-            };
-        });
+        $this->app->bind(Agent::class, CodexCodingAgent::class);
+        $this->app->bind(CodingAgent::class, CodexCodingAgent::class);
+        $this->app->singleton(AgentDriverFactory::class);
+        $this->app->singleton(ExternalTaskProviderFactory::class);
 
         $pullRequestProvider = config('automation.pull_request_provider');
         if (
@@ -69,19 +62,6 @@ class AppServiceProvider extends ServiceProvider
             $this->app->bind(PullRequestProvider::class, $pullRequestProvider);
         } else {
             $this->app->bind(PullRequestProvider::class, GithubPullRequestProvider::class);
-        }
-
-        $provider = Arr::get(config('automation'), 'external_task_provider');
-
-        if (
-            is_string($provider) &&
-            $provider !== '' &&
-            class_exists($provider) &&
-            is_subclass_of($provider, ExternalTaskProvider::class)
-        ) {
-            $this->app->bind(ExternalTaskProvider::class, $provider);
-
-            return;
         }
 
         $this->app->bind(ExternalTaskProvider::class, NullExternalTaskProvider::class);

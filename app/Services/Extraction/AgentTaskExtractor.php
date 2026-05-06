@@ -2,10 +2,10 @@
 
 namespace App\Services\Extraction;
 
-use App\Contracts\Agent;
 use App\Contracts\TaskExtractor;
 use App\Models\InputSource;
 use App\Models\Task;
+use App\Services\Automation\AgentDriverFactory;
 use Exception;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
@@ -13,7 +13,7 @@ use Illuminate\Support\Str;
 
 class AgentTaskExtractor implements TaskExtractor
 {
-    public function __construct(private readonly Agent $agent) {}
+    public function __construct(private readonly AgentDriverFactory $agentDriverFactory) {}
 
     /**
      * @return array<int, array{
@@ -26,9 +26,11 @@ class AgentTaskExtractor implements TaskExtractor
      *     questions: array<int, string>,
      * }>
      */
-    public function extract(InputSource $inputSource, array $projectSummaries = []): array
+    public function extract(InputSource $inputSource, array $projectSummaries = [], ?string $agentDriver = null): array
     {
-        $result = $this->agent->analyzeInputSource($inputSource, $projectSummaries);
+        $result = $this->agentDriverFactory
+            ->makeAgent($agentDriver)
+            ->analyzeInputSource($inputSource, $projectSummaries);
 
         if (! $result->successful) {
             throw new Exception($result->error ?: 'Agent could not analyze the input source.');

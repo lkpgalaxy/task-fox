@@ -230,7 +230,6 @@ const stoppableTaskRunStatuses = [
     'preparing',
     'planning',
     'implementing',
-    'testing',
     'screenshotting',
     'reviewing_changes',
     'generating_commit_message',

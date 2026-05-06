@@ -17,5 +17,5 @@ interface TaskExtractor
      *     questions: array<int, string>,
      * }>
      */
-    public function extract(InputSource $inputSource, array $projectSummaries = []): array;
+    public function extract(InputSource $inputSource, array $projectSummaries = [], ?string $agentDriver = null): array;
 }

@@ -25,6 +25,7 @@ use Illuminate\Support\Facades\Storage;
     'last_error',
     'started_at',
     'finished_at',
+    'coding_agent_driver',
     'analyze_source_model',
     'analyze_source_reasoning_effort',
     'plan_model',
@@ -53,7 +54,7 @@ class TaskRun extends Model
 
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
 
-    public const CHECKPOINT_POST_REVIEW_VERIFIED = 'post_review_verified';
+    public const CHECKPOINT_URL_SMOKE_VERIFIED = 'url_smoke_verified';
 
     public const CHECKPOINT_SCREENSHOT_VERIFIED = 'screenshot_verified';
 
@@ -83,8 +84,6 @@ class TaskRun extends Model
 
     public const STATUS_IMPLEMENTING = 'implementing';
 
-    public const STATUS_TESTING = 'testing';
-
     public const STATUS_SCREENSHOTTING = 'screenshotting';
 
     public const STATUS_REVIEWING_CHANGES = 'reviewing_changes';
@@ -108,7 +107,6 @@ class TaskRun extends Model
         self::STATUS_PREPARING,
         self::STATUS_PLANNING,
         self::STATUS_IMPLEMENTING,
-        self::STATUS_TESTING,
         self::STATUS_SCREENSHOTTING,
         self::STATUS_REVIEWING_CHANGES,
         self::STATUS_GENERATING_COMMIT_MESSAGE,
@@ -121,7 +119,6 @@ class TaskRun extends Model
         self::STATUS_PREPARING,
         self::STATUS_PLANNING,
         self::STATUS_IMPLEMENTING,
-        self::STATUS_TESTING,
         self::STATUS_SCREENSHOTTING,
         self::STATUS_REVIEWING_CHANGES,
         self::STATUS_GENERATING_COMMIT_MESSAGE,
@@ -134,7 +131,7 @@ class TaskRun extends Model
         self::CHECKPOINT_PLANNED,
         self::CHECKPOINT_IMPLEMENTATION,
         self::CHECKPOINT_CHANGES_REVIEWED,
-        self::CHECKPOINT_POST_REVIEW_VERIFIED,
+        self::CHECKPOINT_URL_SMOKE_VERIFIED,
         self::CHECKPOINT_SCREENSHOT_VERIFIED,
         self::CHECKPOINT_CHANGES_COMMITTED,
         self::CHECKPOINT_PULL_REQUEST_CREATED,
@@ -159,8 +156,26 @@ class TaskRun extends Model
     {
         static::creating(function (TaskRun $run): void {
             $snapshot = app(SystemSettingsResolver::class)->snapshot();
+            $columns = [
+                'analyze_source_model',
+                'analyze_source_reasoning_effort',
+                'plan_model',
+                'plan_reasoning_effort',
+                'implement_model',
+                'implement_reasoning_effort',
+                'review_model',
+                'review_reasoning_effort',
+                'commit_message_model',
+                'commit_message_reasoning_effort',
+                'retry_limit',
+                'coding_agent_driver',
+            ];
 
-            foreach ($snapshot as $column => $value) {
+            foreach ($columns as $column) {
+                $value = $column === 'coding_agent_driver'
+                    ? app(SystemSettingsResolver::class)->effectiveCodingAgentDriver()
+                    : ($snapshot[$column] ?? null);
+
                 if ($run->getAttribute($column) !== null && $run->getAttribute($column) !== '') {
                     continue;
                 }
@@ -210,6 +225,7 @@ class TaskRun extends Model
             ->map(function (array $checkpoint): array {
                 $checkpoint['name'] = match ((string) $checkpoint['name']) {
                     self::legacyImplementationCheckpoint() => self::CHECKPOINT_IMPLEMENTATION,
+                    self::legacyUrlSmokeCheckpoint() => self::CHECKPOINT_URL_SMOKE_VERIFIED,
                     default => (string) $checkpoint['name'],
                 };
 
@@ -479,5 +495,10 @@ class TaskRun extends Model
     private static function legacyImplementationCheckpoint(): string
     {
         return 'implementation_verified';
+    }
+
+    private static function legacyUrlSmokeCheckpoint(): string
+    {
+        return 'post_review_verified';
     }
 }

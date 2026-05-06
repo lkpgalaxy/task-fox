@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreInputSourceRequest;
 use App\Jobs\AnalyzeInputSourceJob;
 use App\Models\InputSource;
+use App\Services\SystemSettingsResolver;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
@@ -69,7 +70,7 @@ class InputSourceController extends Controller
         ]);
     }
 
-    public function store(StoreInputSourceRequest $request): RedirectResponse
+    public function store(StoreInputSourceRequest $request, SystemSettingsResolver $settingsResolver): RedirectResponse
     {
         $title = $request->string('title')->trim()->toString();
         $sourceType = $request->string('source_type')->toString();
@@ -130,6 +131,7 @@ class InputSourceController extends Controller
 
         $source = InputSource::create([
             'title' => $title,
+            'agent_driver' => $settingsResolver->effectiveAgentDriver($request->user()),
             'filename' => $filename,
             'file_disk' => $fileDisk,
             'file_path' => $filePath,

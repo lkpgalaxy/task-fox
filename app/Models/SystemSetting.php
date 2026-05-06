@@ -7,6 +7,9 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 #[Fillable([
+    'agent_driver',
+    'coding_agent_driver',
+    'external_task_provider',
     'analyze_source_model',
     'analyze_source_reasoning_effort',
     'plan_model',
@@ -37,6 +40,9 @@ class SystemSetting extends Model
      * @var array<string, string>
      */
     protected $attributes = [
+        'agent_driver' => null,
+        'coding_agent_driver' => null,
+        'external_task_provider' => null,
         'analyze_source_model' => 'gpt-5.3-codex-spark',
         'analyze_source_reasoning_effort' => 'medium',
         'plan_model' => 'gpt-5.3-codex-spark',

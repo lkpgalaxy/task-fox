@@ -5,12 +5,19 @@ import { Button, Field, Input, Panel, Select } from '@/components/ui';
 import profile from '@/routes/profile';
 import type { Auth } from '@/types';
 
+const DISABLED_EXTERNAL_TASK_PROVIDER = '__disabled__';
+
 type PageProps = {
     auth: Auth;
     automationSettings: AutomationSettings | null;
+    automationPreferences: AutomationPreferences | null;
+    automationOptions: AutomationOptions;
 };
 
 type AutomationSettings = {
+    agent_driver: string | null;
+    coding_agent_driver: string | null;
+    external_task_provider: string | null;
     analyze_source_model: string | null;
     analyze_source_reasoning_effort: string | null;
     plan_model: string | null;
@@ -24,8 +31,21 @@ type AutomationSettings = {
     retry_limit: number | null;
 };
 
+type AutomationPreferences = {
+    automation_agent_driver: string | null;
+    automation_coding_agent_driver: string | null;
+    automation_external_task_provider: string | null;
+};
+
+type AutomationOptions = {
+    agent_drivers: Record<string, string>;
+    coding_agent_drivers: Record<string, string>;
+    external_task_providers: Record<string, string>;
+};
+
 export default function ProfileEdit() {
-    const { auth, automationSettings } = usePage<PageProps>().props;
+    const { auth, automationSettings, automationPreferences, automationOptions } =
+        usePage<PageProps>().props;
     const user = auth.user;
     const isAdmin = user?.role === 'admin';
 
@@ -42,7 +62,19 @@ export default function ProfileEdit() {
         password_confirmation: '',
     });
 
+    const automationPreferencesForm = useForm({
+        automation_agent_driver:
+            automationPreferences?.automation_agent_driver ?? '',
+        automation_coding_agent_driver:
+            automationPreferences?.automation_coding_agent_driver ?? '',
+        automation_external_task_provider:
+            automationPreferences?.automation_external_task_provider ?? '',
+    });
+
     const automationForm = useForm({
+        agent_driver: automationSettings?.agent_driver ?? '',
+        coding_agent_driver: automationSettings?.coding_agent_driver ?? '',
+        external_task_provider: automationSettings?.external_task_provider ?? '',
         analyze_source_model: automationSettings?.analyze_source_model ?? '',
         analyze_source_reasoning_effort:
             automationSettings?.analyze_source_reasoning_effort ?? '',
@@ -79,6 +111,18 @@ export default function ProfileEdit() {
         automationForm.patch(profile.automation.update.url(), {
             preserveScroll: true,
         });
+    };
+
+    const submitAutomationPreferences = (
+        event: FormEvent<HTMLFormElement>,
+    ) => {
+        event.preventDefault();
+        automationPreferencesForm.patch(
+            profile.automation.preferences.update.url(),
+            {
+                preserveScroll: true,
+            },
+        );
     };
 
     return (
@@ -238,6 +282,127 @@ export default function ProfileEdit() {
                     </form>
                 </Panel>
 
+                <Panel className="p-5 lg:col-span-2">
+                    <form
+                        className="grid gap-4"
+                        onSubmit={submitAutomationPreferences}
+                    >
+                        <div className="space-y-1">
+                            <h2 className="text-base font-semibold text-ink">
+                                Personal automation overrides
+                            </h2>
+                            <p className="text-sm text-ink-muted">
+                                Leave a field blank to inherit the shared
+                                default. Choose Disabled for external task sync
+                                to keep it off for tasks you approve.
+                            </p>
+                        </div>
+                        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                            <Field
+                                label="Agent driver"
+                                error={
+                                    automationPreferencesForm.errors
+                                        .automation_agent_driver
+                                }
+                            >
+                                <Select
+                                    value={
+                                        automationPreferencesForm.data
+                                            .automation_agent_driver
+                                    }
+                                    onChange={(event) =>
+                                        automationPreferencesForm.setData(
+                                            'automation_agent_driver',
+                                            event.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="">Inherit shared default</option>
+                                    {Object.entries(
+                                        automationOptions.agent_drivers,
+                                    ).map(([value, label]) => (
+                                        <option key={value} value={value}>
+                                            {label}
+                                        </option>
+                                    ))}
+                                </Select>
+                            </Field>
+                            <Field
+                                label="Coding agent driver"
+                                error={
+                                    automationPreferencesForm.errors
+                                        .automation_coding_agent_driver
+                                }
+                            >
+                                <Select
+                                    value={
+                                        automationPreferencesForm.data
+                                            .automation_coding_agent_driver
+                                    }
+                                    onChange={(event) =>
+                                        automationPreferencesForm.setData(
+                                            'automation_coding_agent_driver',
+                                            event.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="">Inherit shared default</option>
+                                    {Object.entries(
+                                        automationOptions.coding_agent_drivers,
+                                    ).map(([value, label]) => (
+                                        <option key={value} value={value}>
+                                            {label}
+                                        </option>
+                                    ))}
+                                </Select>
+                            </Field>
+                            <Field
+                                label="External task provider"
+                                error={
+                                    automationPreferencesForm.errors
+                                        .automation_external_task_provider
+                                }
+                            >
+                                <Select
+                                    value={
+                                        automationPreferencesForm.data
+                                            .automation_external_task_provider
+                                    }
+                                    onChange={(event) =>
+                                        automationPreferencesForm.setData(
+                                            'automation_external_task_provider',
+                                            event.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="">Inherit shared default</option>
+                                    <option value={DISABLED_EXTERNAL_TASK_PROVIDER}>
+                                        Disabled
+                                    </option>
+                                    {Object.entries(
+                                        automationOptions.external_task_providers,
+                                    ).map(([value, label]) => (
+                                        <option key={value} value={value}>
+                                            {label}
+                                        </option>
+                                    ))}
+                                </Select>
+                            </Field>
+                        </div>
+                        <div className="flex justify-end">
+                            <Button
+                                type="submit"
+                                variant="primary"
+                                disabled={automationPreferencesForm.processing}
+                            >
+                                {automationPreferencesForm.processing
+                                    ? 'Saving...'
+                                    : 'Save automation overrides'}
+                            </Button>
+                        </div>
+                    </form>
+                </Panel>
+
                 {isAdmin ? (
                     <Panel className="p-5 lg:col-span-2">
                         <form
@@ -252,6 +417,95 @@ export default function ProfileEdit() {
                                     Leave model or effort blank to use
                                     Codex&apos;s default for that step.
                                 </p>
+                            </div>
+                            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                                <Field
+                                    label="Agent driver"
+                                    error={automationForm.errors.agent_driver}
+                                >
+                                    <Select
+                                        value={automationForm.data.agent_driver}
+                                        onChange={(event) =>
+                                            automationForm.setData(
+                                                'agent_driver',
+                                                event.target.value,
+                                            )
+                                        }
+                                    >
+                                        <option value="">
+                                            Config / env default
+                                        </option>
+                                        {Object.entries(
+                                            automationOptions.agent_drivers,
+                                        ).map(([value, label]) => (
+                                            <option key={value} value={value}>
+                                                {label}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </Field>
+                                <Field
+                                    label="Coding agent driver"
+                                    error={
+                                        automationForm.errors
+                                            .coding_agent_driver
+                                    }
+                                >
+                                    <Select
+                                        value={
+                                            automationForm.data
+                                                .coding_agent_driver
+                                        }
+                                        onChange={(event) =>
+                                            automationForm.setData(
+                                                'coding_agent_driver',
+                                                event.target.value,
+                                            )
+                                        }
+                                    >
+                                        <option value="">
+                                            Config / env default
+                                        </option>
+                                        {Object.entries(
+                                            automationOptions.coding_agent_drivers,
+                                        ).map(([value, label]) => (
+                                            <option key={value} value={value}>
+                                                {label}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </Field>
+                                <Field
+                                    label="External task provider"
+                                    error={
+                                        automationForm.errors
+                                            .external_task_provider
+                                    }
+                                >
+                                    <Select
+                                        value={
+                                            automationForm.data
+                                                .external_task_provider
+                                        }
+                                        onChange={(event) =>
+                                            automationForm.setData(
+                                                'external_task_provider',
+                                                event.target.value,
+                                            )
+                                        }
+                                    >
+                                        <option value="">
+                                            Disabled / config fallback
+                                        </option>
+                                        {Object.entries(
+                                            automationOptions.external_task_providers,
+                                        ).map(([value, label]) => (
+                                            <option key={value} value={value}>
+                                                {label}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </Field>
                             </div>
                             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                                 <AutomationStepFields
