@@ -72,7 +72,6 @@ type PhaseSessionRecord = {
     phase: 'plan' | 'implement' | 'test' | 'review';
     status: string;
     session_id: string | null;
-    resume_command: string | null;
     model: string | null;
     reasoning_effort: string | null;
     attempt_count: number;
@@ -1309,13 +1308,6 @@ function TaskDetails({
                                                                     Session:{' '}
                                                                     {
                                                                         phaseSession.session_id
-                                                                    }
-                                                                </p>
-                                                            ) : null}
-                                                            {phaseSession.resume_command ? (
-                                                                <p className="mt-2 font-mono text-[11px] break-all text-ink-tertiary">
-                                                                    {
-                                                                        phaseSession.resume_command
                                                                     }
                                                                 </p>
                                                             ) : null}

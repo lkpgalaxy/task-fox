@@ -3,6 +3,7 @@
 use App\Contracts\CodingAgent;
 use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
+use App\DataTransferObjects\CodingAgentInvocation;
 use App\DataTransferObjects\CodingAgentResult;
 use App\DataTransferObjects\PullRequestResult;
 use App\Enums\PullRequestReviewState;
@@ -159,7 +160,7 @@ test('stop requests interruption for active executing task runs', function () {
         'base_branch' => 'main',
     ]);
     $run->initializeWorkflowState($task);
-    $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+    $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION);
 
     $this->post(route('tasks.stop', $task))
         ->assertRedirect(route('tasks.index', ['task' => $task->id]))
@@ -1237,7 +1238,9 @@ test('RunApprovedTaskWithCodingAgentJob stores failed test output for agent retr
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
-            $mock->shouldReceive('reviewChanges')->never();
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')->never();
         })
     );
@@ -1290,6 +1293,9 @@ test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit f
             $mock->shouldReceive('reviewChanges')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('resumeReview')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: finite implementation retry']));
@@ -1301,8 +1307,11 @@ test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit f
 
     expect($run->refresh())
         ->attempt_count->toBe(2)
+        ->review_attempt_count->toBe(2)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2')
+        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(1)
+        ->and($run->phaseSessions()->where('phase', 'test')->value('attempt_count'))->toBe(2);
 });
 
 test('RunApprovedTaskWithCodingAgentJob retries implementation without limit when snapshot retry limit is unlimited', function () {
@@ -1336,6 +1345,9 @@ test('RunApprovedTaskWithCodingAgentJob retries implementation without limit whe
             $mock->shouldReceive('reviewChanges')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('resumeReview')
+                ->twice()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: unlimited implementation retry']));
@@ -1347,6 +1359,7 @@ test('RunApprovedTaskWithCodingAgentJob retries implementation without limit whe
 
     expect($run->refresh())
         ->attempt_count->toBe(3)
+        ->review_attempt_count->toBe(3)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE);
 });
 
@@ -1408,9 +1421,10 @@ test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function
         ->and(collect($run->workflowCheckpoints())->pluck('name')->all())->toBe([
             TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
             TaskRun::CHECKPOINT_PLANNED,
-            TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
-            TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
+            TaskRun::CHECKPOINT_IMPLEMENTATION,
             TaskRun::CHECKPOINT_CHANGES_REVIEWED,
+            TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED,
+            TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
             TaskRun::CHECKPOINT_CHANGES_COMMITTED,
             TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
             TaskRun::CHECKPOINT_REVIEW_REQUESTED,
@@ -1421,7 +1435,7 @@ test('RunApprovedTaskWithCodingAgentJob reviews changes before commit', function
         );
 });
 
-test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when project URL is configured', function () {
+test('RunApprovedTaskWithCodingAgentJob captures screenshot after post-review verification when project URL is configured', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
 
@@ -1447,6 +1461,13 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
 
                     return new CodingAgentResult(successful: true);
                 });
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturnUsing(function () use (&$events): CodingAgentResult {
+                    $events[] = 'review';
+
+                    return new CodingAgentResult(successful: true);
+                });
             $mock->shouldReceive('smokeTestUrl')
                 ->once()
                 ->andReturnUsing(function () use (&$events): CodingAgentResult {
@@ -1462,13 +1483,6 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
 
                     return new CodingAgentResult(successful: true, messages: ['screenshot captured']);
                 });
-            $mock->shouldReceive('reviewChanges')
-                ->once()
-                ->andReturnUsing(function () use (&$events): CodingAgentResult {
-                    $events[] = 'review';
-
-                    return new CodingAgentResult(successful: true);
-                });
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturnUsing(function () use (&$events): CodingAgentResult {
@@ -1482,19 +1496,21 @@ test('RunApprovedTaskWithCodingAgentJob captures screenshot before review when p
 
     app()->call([new RunApprovedTaskWithCodingAgentJob($run->id), 'handle']);
 
-    expect($events)->toBe(['planning', 'implementation', 'url-smoke', 'screenshot', 'review', 'commit-message', 'pull-request'])
+    expect($events)->toBe(['planning', 'implementation', 'review', 'url-smoke', 'screenshot', 'commit-message', 'pull-request'])
+        ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->refresh()->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->logs()->where('message', 'URL smoke test passed')->exists())->toBeTrue()
         ->and($run->logs()->where('message', 'Screenshot captured')->exists())->toBeTrue();
 });
 
-test('RunApprovedTaskWithCodingAgentJob fails implementation verification when URL smoke test fails', function () {
+test('RunApprovedTaskWithCodingAgentJob fails post-review verification when URL smoke test fails', function () {
     Queue::fake();
     config(['automation.tests.command' => 'true']);
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'URL smoke failure', null, 'https://app.test');
     $run = createAutomationRun($task, $repositoryPath, 'task/url-smoke-failure');
+    $run->update(['retry_limit' => 1]);
 
     test()->instance(
         CodingAgent::class,
@@ -1505,11 +1521,13 @@ test('RunApprovedTaskWithCodingAgentJob fails implementation verification when U
             $mock->shouldReceive('run')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('reviewChanges')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('smokeTestUrl')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: false, error: 'Page shows a database exception.'));
             $mock->shouldReceive('captureScreenshot')->never();
-            $mock->shouldReceive('reviewChanges')->never();
             $mock->shouldReceive('fixReviewFindings')->never();
             $mock->shouldReceive('generateCommitMessage')->never();
         })
@@ -1528,7 +1546,9 @@ test('RunApprovedTaskWithCodingAgentJob fails implementation verification when U
     expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
         ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
         ->and($run->last_error)->toBe('Page shows a database exception.')
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
@@ -1551,17 +1571,14 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
-                ->twice()
-                ->with(Mockery::type(Task::class), Mockery::type(TaskRun::class), Mockery::any())
-                ->andReturn(
-                    new CodingAgentResult(
-                        successful: false,
-                        messages: ['review output'],
-                        error: 'Needs fixes.',
-                        payload: ['findings' => [['title' => '[P2] Missing test']]],
-                    ),
-                    new CodingAgentResult(successful: true),
-                );
+                ->once()
+                ->with(Mockery::type(Task::class), Mockery::type(TaskRun::class), 1)
+                ->andReturn(new CodingAgentResult(
+                    successful: false,
+                    messages: ['review output'],
+                    error: 'Needs fixes.',
+                    payload: ['findings' => [['title' => '[P2] Missing test']]],
+                ));
             $mock->shouldReceive('fixReviewFindings')
                 ->once()
                 ->with(
@@ -1571,6 +1588,10 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
                     1,
                 )
                 ->andReturn(new CodingAgentResult(successful: true, messages: ['applied fix']));
+            $mock->shouldReceive('resumeReview')
+                ->once()
+                ->with(Mockery::type(Task::class), Mockery::type(TaskRun::class), Mockery::type('string'), 2)
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: review retry']));
@@ -1583,7 +1604,7 @@ test('RunApprovedTaskWithCodingAgentJob stops review retries after success', fun
     expect($run->refresh())
         ->review_attempt_count->toBe(2)
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2');
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('1');
 });
 
 test('RunApprovedTaskWithCodingAgentJob stops when a stop request is present before execution', function () {
@@ -1662,19 +1683,19 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
                     context: ['command' => ['codex', 'exec', 'Implementation prompt']],
                 ));
             $mock->shouldReceive('reviewChanges')
-                ->twice()
-                ->andReturn(
-                    new CodingAgentResult(
-                        successful: false,
-                        messages: ['review output'],
-                        error: 'Needs fixes.',
-                        payload: ['findings' => [['title' => '[P2] Missing test']]],
-                    ),
-                    new CodingAgentResult(successful: true),
-                );
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: false,
+                    messages: ['review output'],
+                    error: 'Needs fixes.',
+                    payload: ['findings' => [['title' => '[P2] Missing test']]],
+                ));
             $mock->shouldReceive('fixReviewFindings')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, messages: ['applied fix']));
+            $mock->shouldReceive('resumeReview')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: log agent metadata']));
@@ -1690,6 +1711,7 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
             'Coding agent planning started',
             'Coding agent invocation started',
             'Coding agent review started',
+            'Coding agent review resumed',
             'Coding agent review fix started',
             'Coding agent commit message generation started',
         ])
@@ -1716,9 +1738,8 @@ test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', f
     $expectAgentContext($invocationStartedContext, 'implement', 'gpt-implement', 'medium');
     expect($planningStartedContext['command'])->toBe(['codex', 'exec', 'Planning prompt'])
         ->and($invocationStartedContext['command'])->toBe(['codex', 'exec', 'Implementation prompt']);
-    $logsByMessage->get('Coding agent review started')->each(
-        fn (TaskRunLog $log) => $expectAgentContext($log->context, 'review', 'gpt-review', 'high'),
-    );
+    $expectAgentContext($logsByMessage->get('Coding agent review started')->sole()->context, 'review', 'gpt-review', 'high');
+    $expectAgentContext($logsByMessage->get('Coding agent review resumed')->sole()->context, 'review', 'gpt-review', 'high');
     $expectAgentContext($logsByMessage->get('Coding agent review fix started')->sole()->context, 'review_fix', 'gpt-implement', 'medium');
     $expectAgentContext($logsByMessage->get('Coding agent commit message generation started')->sole()->context, 'commit_message', 'gpt-commit', null);
 
@@ -1835,14 +1856,14 @@ test('RunApprovedTaskWithCodingAgentJob fails when the review fixer fails before
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
-test('RunApprovedTaskWithCodingAgentJob keeps fixing when tests fail after a review fix', function () {
+test('RunApprovedTaskWithCodingAgentJob reruns post-review verification in the same phase sessions after test failures', function () {
     Queue::fake();
 
     $repositoryPath = createCleanGitRepository();
     $task = createApprovedAutomationTask($repositoryPath, 'Retry tests after fix');
     $run = createAutomationRun($task, $repositoryPath, 'task/retry-tests-after-fix');
     $testsCountPath = $repositoryPath.'/tests-count.txt';
-    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 2)]);
+    config(['automation.tests.command' => reviewCountingTestCommand($testsCountPath, 1)]);
 
     test()->instance(
         CodingAgent::class,
@@ -1852,27 +1873,22 @@ test('RunApprovedTaskWithCodingAgentJob keeps fixing when tests fail after a rev
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry tests after a fix.']));
             $mock->shouldReceive('run')
                 ->once()
-                ->andReturn(new CodingAgentResult(successful: true));
+                ->andReturn(new CodingAgentResult(
+                    successful: true,
+                    invocation: new CodingAgentInvocation(sessionId: 'implement-session'),
+                ));
             $mock->shouldReceive('reviewChanges')
-                ->twice()
-                ->andReturn(
-                    new CodingAgentResult(
-                        successful: false,
-                        messages: ['review output'],
-                        error: 'Needs fixes.',
-                        payload: ['findings' => [['title' => '[P2] Missing test']]],
-                    ),
-                    new CodingAgentResult(successful: true),
-                );
-            $mock->shouldReceive('fixReviewFindings')
-                ->twice()
-                ->with(
-                    Mockery::type(Task::class),
-                    Mockery::type(TaskRun::class),
-                    Mockery::type('string'),
-                    Mockery::any(),
-                )
-                ->andReturn(new CodingAgentResult(successful: true, messages: ['fixed']));
+                ->once()
+                ->andReturn(new CodingAgentResult(
+                    successful: true,
+                    invocation: new CodingAgentInvocation(sessionId: 'review-session'),
+                ));
+            $mock->shouldReceive('resumeImplementation')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('resumeReview')
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('generateCommitMessage')
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['message' => 'test: retry review fix tests']));
@@ -1885,11 +1901,19 @@ test('RunApprovedTaskWithCodingAgentJob keeps fixing when tests fail after a rev
     expect($run->refresh())
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->last_error->toBeNull()
-        ->review_attempt_count->toBe(3)
+        ->attempt_count->toBe(2)
+        ->review_attempt_count->toBe(2)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
         ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_COMMITTED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_COMPLETED)
-        ->and($run->logs()->where('message', 'Tests failed after review fix; retrying')->exists())->toBeTrue()
-        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('3');
+        ->and($run->logs()->where('message', 'Post-review verification failed; retrying')->exists())->toBeTrue()
+        ->and(trim((string) file_get_contents($testsCountPath)))->toBe('2')
+        ->and($run->phaseSessions()->where('phase', 'implement')->value('session_id'))->toBe('implement-session')
+        ->and($run->phaseSessions()->where('phase', 'implement')->value('attempt_count'))->toBe(2)
+        ->and($run->phaseSessions()->where('phase', 'review')->value('session_id'))->toBe('review-session')
+        ->and($run->phaseSessions()->where('phase', 'review')->value('attempt_count'))->toBe(2)
+        ->and($run->phaseSessions()->where('phase', 'test')->count())->toBe(1)
+        ->and($run->phaseSessions()->where('phase', 'test')->value('attempt_count'))->toBe(2);
 });
 
 test('RunApprovedTaskWithCodingAgentJob uses generated commit message for git commit', function () {
@@ -2005,7 +2029,7 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
     $run->initializeWorkflowState($task);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
     $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
-    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION);
     $run->update(['status' => TaskRun::STATUS_FAILED]);
 
     test()->instance(
@@ -2029,7 +2053,8 @@ test('RunApprovedTaskWithCodingAgentJob resumes from first incomplete checkpoint
         ->status->toBe(TaskRun::STATUS_WAITING_FOR_MERGE)
         ->attempt_count->toBe(0)
         ->review_attempt_count->toBe(1)
-        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue();
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_CHANGES_REVIEWED))->toBeTrue()
+        ->and($run->isCheckpointComplete(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED))->toBeTrue();
 });
 
 test('task run retries the failed checkpoint before the next pending checkpoint', function () {
@@ -2053,7 +2078,7 @@ test('task run retries the failed checkpoint before the next pending checkpoint'
         ->and($run->nextRunnableCheckpoint())->toBe(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
 });
 
-test('task run workflow initializes planning before implementation verification', function () {
+test('task run workflow initializes planning before review and post-review verification', function () {
     $task = Task::create([
         'title' => 'Plan before implementation',
         'description' => 'Planning should be an automatic checkpoint.',
@@ -2071,9 +2096,10 @@ test('task run workflow initializes planning before implementation verification'
     expect(collect($run->refresh()->workflowCheckpoints())->pluck('name')->all())->toBe([
         TaskRun::CHECKPOINT_REPOSITORY_PREPARED,
         TaskRun::CHECKPOINT_PLANNED,
-        TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED,
-        TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
+        TaskRun::CHECKPOINT_IMPLEMENTATION,
         TaskRun::CHECKPOINT_CHANGES_REVIEWED,
+        TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED,
+        TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED,
         TaskRun::CHECKPOINT_CHANGES_COMMITTED,
         TaskRun::CHECKPOINT_PULL_REQUEST_CREATED,
         TaskRun::CHECKPOINT_REVIEW_REQUESTED,
@@ -2139,7 +2165,7 @@ test('failed planning stores checkpoint failure and does not run implementation'
         ->last_error->toBe('Planning failed.')
         ->plan->toBeNull()
         ->and($run->checkpoint(TaskRun::CHECKPOINT_PLANNED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
-        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_IMPLEMENTATION)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_PENDING);
 });
 
 test('repository checkpoint retry checks out existing ai branch without resetting work', function () {

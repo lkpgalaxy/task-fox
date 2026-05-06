@@ -37,7 +37,6 @@ class TaskRunPhaseSessionRecorder
         $session->fill([
             'status' => $successful ? TaskRunPhaseSession::STATUS_COMPLETED : TaskRunPhaseSession::STATUS_FAILED,
             'session_id' => $invocation->sessionId ?? $session->session_id,
-            'resume_command' => $invocation->resumeCommand ?? $session->resume_command,
             'model' => $invocation->model ?? $session->model,
             'reasoning_effort' => $invocation->reasoningEffort ?? $session->reasoning_effort,
             'input_tokens' => ((int) $session->input_tokens) + (int) Arr::get($usage, 'input_tokens', 0),

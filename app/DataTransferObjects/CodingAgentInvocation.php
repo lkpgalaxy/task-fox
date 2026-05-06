@@ -12,7 +12,6 @@ readonly class CodingAgentInvocation
     public function __construct(
         public array $command = [],
         public ?string $sessionId = null,
-        public ?string $resumeCommand = null,
         public ?string $model = null,
         public ?string $reasoningEffort = null,
         public array $usage = [],
@@ -28,7 +27,6 @@ readonly class CodingAgentInvocation
         return array_merge($context, $this->context, array_filter([
             'command' => $this->command !== [] ? $this->command : null,
             'session_id' => $this->sessionId,
-            'resume_command' => $this->resumeCommand,
             'model' => $this->model,
             'reasoning_effort' => $this->reasoningEffort,
             'usage' => $this->usage !== [] ? $this->usage : null,

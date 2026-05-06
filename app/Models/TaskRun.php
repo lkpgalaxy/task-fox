@@ -49,11 +49,13 @@ class TaskRun extends Model
 
     public const CHECKPOINT_PLANNED = 'planned';
 
-    public const CHECKPOINT_IMPLEMENTATION_VERIFIED = 'implementation_verified';
-
-    public const CHECKPOINT_SCREENSHOT_VERIFIED = 'screenshot_verified';
+    public const CHECKPOINT_IMPLEMENTATION = 'implementation';
 
     public const CHECKPOINT_CHANGES_REVIEWED = 'changes_reviewed';
+
+    public const CHECKPOINT_POST_REVIEW_VERIFIED = 'post_review_verified';
+
+    public const CHECKPOINT_SCREENSHOT_VERIFIED = 'screenshot_verified';
 
     public const CHECKPOINT_CHANGES_COMMITTED = 'changes_committed';
 
@@ -130,9 +132,10 @@ class TaskRun extends Model
     public const WORKFLOW_CHECKPOINTS = [
         self::CHECKPOINT_REPOSITORY_PREPARED,
         self::CHECKPOINT_PLANNED,
-        self::CHECKPOINT_IMPLEMENTATION_VERIFIED,
-        self::CHECKPOINT_SCREENSHOT_VERIFIED,
+        self::CHECKPOINT_IMPLEMENTATION,
         self::CHECKPOINT_CHANGES_REVIEWED,
+        self::CHECKPOINT_POST_REVIEW_VERIFIED,
+        self::CHECKPOINT_SCREENSHOT_VERIFIED,
         self::CHECKPOINT_CHANGES_COMMITTED,
         self::CHECKPOINT_PULL_REQUEST_CREATED,
         self::CHECKPOINT_REVIEW_REQUESTED,
@@ -204,6 +207,14 @@ class TaskRun extends Model
 
         $existingCheckpoints = collect(Arr::get($state, 'checkpoints', []))
             ->filter(fn (mixed $checkpoint): bool => is_array($checkpoint) && is_string($checkpoint['name'] ?? null))
+            ->map(function (array $checkpoint): array {
+                $checkpoint['name'] = match ((string) $checkpoint['name']) {
+                    self::legacyImplementationCheckpoint() => self::CHECKPOINT_IMPLEMENTATION,
+                    default => (string) $checkpoint['name'],
+                };
+
+                return $checkpoint;
+            })
             ->keyBy(fn (array $checkpoint): string => (string) $checkpoint['name']);
 
         $state['request_hash'] ??= self::requestHashForTask($task);
@@ -463,5 +474,10 @@ class TaskRun extends Model
 
         $this->forceFill(['workflow_state' => $state])->save();
         $this->refresh();
+    }
+
+    private static function legacyImplementationCheckpoint(): string
+    {
+        return 'implementation_verified';
     }
 }

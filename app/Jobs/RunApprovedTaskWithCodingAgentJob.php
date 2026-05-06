@@ -79,9 +79,10 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 match ($checkpoint) {
                     TaskRun::CHECKPOINT_REPOSITORY_PREPARED => $this->prepareRepository($run, $repositoryPath, $branchName, $baseBranch),
                     TaskRun::CHECKPOINT_PLANNED => $this->planImplementation($codingAgent, $task, $run),
-                    TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED => $this->verifyImplementation($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
-                    TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED => $this->verifyScreenshot($codingAgent, $task, $run),
+                    TaskRun::CHECKPOINT_IMPLEMENTATION => $this->implementChanges($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_REVIEWED => $this->reviewChanges($codingAgent, $task, $run, $repositoryPath),
+                    TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED => $this->verifyPostReviewChanges($codingAgent, $externalTaskProvider, $task, $run, $repositoryPath),
+                    TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED => $this->verifyScreenshot($codingAgent, $task, $run),
                     TaskRun::CHECKPOINT_CHANGES_COMMITTED => $this->commitChanges($codingAgent, $task, $run, $repositoryPath, $branchName),
                     TaskRun::CHECKPOINT_PULL_REQUEST_CREATED => $this->createPullRequest($pullRequestProvider, $task, $run),
                     TaskRun::CHECKPOINT_REVIEW_REQUESTED => $this->requestReview($pullRequestProvider, $task, $run),
@@ -221,84 +222,38 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
     }
 
-    private function verifyImplementation(
-        CodingAgent $codingAgent,
-        ExternalTaskProvider $externalTaskProvider,
-        Task $task,
-        TaskRun $run,
-        string $repositoryPath,
-    ): void {
-        $retryLimit = $this->retryLimit($run);
+    private function implementChanges(CodingAgent $codingAgent, Task $task, TaskRun $run): void
+    {
+        $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION);
+        $attempt = $run->checkpointAttempts(TaskRun::CHECKPOINT_IMPLEMENTATION);
+        $run->update([
+            'status' => TaskRun::STATUS_IMPLEMENTING,
+            'attempt_count' => $attempt,
+        ]);
+        $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
 
-        for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
-            $this->throwIfStopRequested($run);
+        $startLog = $this->log($run, 'info', 'Coding agent invocation started', array_merge(
+            $this->agentLogContext($run, 'implement'),
+            ['attempt' => $attempt],
+        ));
 
-            $run->markCheckpointRunning(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
-            $run->update([
-                'status' => TaskRun::STATUS_IMPLEMENTING,
-                'attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED),
-            ]);
-            $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
+        $agentResult = $attempt === 1
+            ? $codingAgent->run($task, $run)
+            : $codingAgent->resumeImplementation(
+                $task,
+                $run,
+                trim((string) $run->refresh()->last_error),
+                $attempt,
+            );
+        $this->mergeAgentCommandContext($startLog, $agentResult);
+        $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_IMPLEMENT, $agentResult);
+        $this->logAgentMessages($run, $agentResult);
 
-            $startLog = $this->log($run, 'info', 'Coding agent invocation started', array_merge(
-                $this->agentLogContext($run, 'implement'),
-                ['attempt' => $attempt],
-            ));
-
-            $agentResult = $attempt === 1
-                ? $codingAgent->run($task, $run)
-                : $codingAgent->resumeImplementation(
-                    $task,
-                    $run,
-                    trim((string) $run->refresh()->last_error),
-                    $attempt,
-                );
-            $this->mergeAgentCommandContext($startLog, $agentResult);
-            $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_IMPLEMENT, $agentResult);
-            $this->logAgentMessages($run, $agentResult);
-
-            if (! $agentResult->successful) {
-                throw new Exception((string) $agentResult->error ?: 'Coding agent execution failed.');
-            }
-
-            $this->throwIfStopRequested($run);
-
-            if ($this->runTests($repositoryPath, $run)) {
-                $this->throwIfStopRequested($run);
-                $this->verifyProjectUrl($codingAgent, $task, $run);
-                $this->throwIfStopRequested($run);
-                $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED);
-
-                return;
-            }
-
-            if (! $this->allowsRetry($attempt, $retryLimit)) {
-                $testFailure = trim((string) $run->refresh()->last_error);
-
-                throw new Exception($testFailure !== ''
-                    ? "Tests failed after retry limit reached.\n\n{$testFailure}"
-                    : 'Tests failed after retry limit reached.');
-            }
-
-            $this->log($run, 'warning', 'Tests failed; retrying', [
-                'attempt' => $attempt,
-                'max_attempts' => $this->retryLimitLabel($retryLimit),
-            ]);
-
-            if ($task->externalTaskLink) {
-                $task->externalTaskLink->messages()->create([
-                    'type' => 'attempt',
-                    'payload' => ['run_id' => $run->id, 'attempt' => $attempt, 'outcome' => 'retrying'],
-                    'status' => 'failed',
-                    'error' => 'Tests failed, scheduling retry.',
-                    'sent_at' => now(),
-                ]);
-
-                $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed tests; retrying ({$attempt}/{$this->retryLimitLabel($retryLimit)}).");
-            }
-
-            $run->update(['status' => TaskRun::STATUS_PLANNING]);
+        if (! $agentResult->successful) {
+            throw new Exception((string) $agentResult->error ?: 'Coding agent execution failed.');
         }
+
+        $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION);
     }
 
     private function verifyProjectUrl(CodingAgent $codingAgent, Task $task, TaskRun $run): void
@@ -383,6 +338,155 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         ]);
 
         $run->markCheckpointCompleted(TaskRun::CHECKPOINT_SCREENSHOT_VERIFIED);
+    }
+
+    private function verifyPostReviewChanges(
+        CodingAgent $codingAgent,
+        ExternalTaskProvider $externalTaskProvider,
+        Task $task,
+        TaskRun $run,
+        string $repositoryPath,
+    ): void {
+        $retryLimit = $this->retryLimit($run);
+
+        for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
+            $this->throwIfStopRequested($run);
+
+            $run->markCheckpointRunning(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED);
+
+            if (! $this->runTests($repositoryPath, $run)) {
+                $testFailure = trim((string) $run->refresh()->last_error);
+
+                if (! $this->allowsRetry($attempt, $retryLimit)) {
+                    throw new Exception($testFailure !== ''
+                        ? "Tests failed after retry limit reached.\n\n{$testFailure}"
+                        : 'Tests failed after retry limit reached.');
+                }
+
+                $this->log($run, 'warning', 'Post-review verification failed; retrying', [
+                    'attempt' => $attempt,
+                    'max_attempts' => $this->retryLimitLabel($retryLimit),
+                    'phase' => 'test',
+                ]);
+
+                $this->resumeImplementationAfterVerificationFailure(
+                    $codingAgent,
+                    $externalTaskProvider,
+                    $task,
+                    $run,
+                    $attempt,
+                    $testFailure,
+                    'Tests failed, scheduling retry.',
+                );
+
+                continue;
+            }
+
+            try {
+                $this->verifyProjectUrl($codingAgent, $task, $run);
+            } catch (Throwable $exception) {
+                if (! $this->allowsRetry($attempt, $retryLimit)) {
+                    throw $exception;
+                }
+
+                $failure = $exception->getMessage();
+
+                $this->log($run, 'warning', 'Post-review verification failed; retrying', [
+                    'attempt' => $attempt,
+                    'max_attempts' => $this->retryLimitLabel($retryLimit),
+                    'phase' => 'url_smoke',
+                    'error' => $failure,
+                ]);
+
+                $run->update(['last_error' => $failure]);
+
+                $this->resumeImplementationAfterVerificationFailure(
+                    $codingAgent,
+                    $externalTaskProvider,
+                    $task,
+                    $run,
+                    $attempt,
+                    $failure,
+                    'URL smoke test failed, scheduling retry.',
+                );
+
+                continue;
+            }
+
+            $run->markCheckpointCompleted(TaskRun::CHECKPOINT_POST_REVIEW_VERIFIED);
+
+            return;
+        }
+    }
+
+    private function resumeImplementationAfterVerificationFailure(
+        CodingAgent $codingAgent,
+        ExternalTaskProvider $externalTaskProvider,
+        Task $task,
+        TaskRun $run,
+        int $attempt,
+        string $feedback,
+        string $externalError,
+    ): void {
+        if ($task->externalTaskLink) {
+            $task->externalTaskLink->messages()->create([
+                'type' => 'attempt',
+                'payload' => ['run_id' => $run->id, 'attempt' => $attempt, 'outcome' => 'retrying'],
+                'status' => 'failed',
+                'error' => $externalError,
+                'sent_at' => now(),
+            ]);
+
+            $externalTaskProvider->addComment($task->externalTaskLink, "Run {$run->id} failed post-review verification; retrying ({$attempt}/{$this->retryLimitLabel($this->retryLimit($run))}).");
+        }
+
+        $run->update([
+            'status' => TaskRun::STATUS_IMPLEMENTING,
+            'last_error' => $feedback,
+        ]);
+
+        $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
+        $fixLog = $this->log($run, 'info', 'Coding agent verification fix started', array_merge(
+            $this->agentLogContext($run, 'review_fix'),
+            ['attempt' => $attempt],
+        ));
+        $fixResult = $codingAgent->resumeImplementation($task, $run, $feedback, $attempt + 1);
+        $this->mergeAgentCommandContext($fixLog, $fixResult);
+        $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_IMPLEMENT, $fixResult);
+        $this->logAgentMessages($run, $fixResult);
+
+        if (! $fixResult->successful) {
+            throw new Exception((string) $fixResult->error ?: 'Coding agent verification fix failed.');
+        }
+
+        $run->update([
+            'attempt_count' => $run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_IMPLEMENT)->value('attempt_count') ?? $run->attempt_count,
+            'status' => TaskRun::STATUS_REVIEWING_CHANGES,
+        ]);
+
+        $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_REVIEW);
+        $reviewLog = $this->log($run, 'info', 'Coding agent review resumed', array_merge(
+            $this->agentLogContext($run, 'review'),
+            ['attempt' => $attempt + 1, 'reason' => 'post_review_verification_failed'],
+        ));
+        $reviewResult = $codingAgent->resumeReview(
+            $task,
+            $run,
+            "Implementation changes were updated to address this post-review verification failure:\n\n{$feedback}\n\nRe-review the latest diff and changed tests before verification is rerun.",
+            $attempt + 1,
+        );
+        $this->mergeAgentCommandContext($reviewLog, $reviewResult);
+        $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_REVIEW, $reviewResult);
+        $this->logAgentMessages($run, $reviewResult);
+
+        if (! $reviewResult->successful) {
+            throw new Exception((string) $reviewResult->error ?: 'Coding agent review resume failed.');
+        }
+
+        $run->update([
+            'review_attempt_count' => $run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_REVIEW)->value('attempt_count') ?? $run->review_attempt_count,
+            'last_error' => null,
+        ]);
     }
 
     private function resolvePullRequestReviewer(Task $task): ?User
@@ -551,7 +655,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     {
         $retryLimit = $this->retryLimit($run);
         $reviewFeedback = null;
-        $testFailure = null;
 
         for ($attempt = 1; $this->allowsAttempt($attempt, $retryLimit); $attempt++) {
             $this->throwIfStopRequested($run);
@@ -564,12 +667,13 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
             if ($reviewFeedback === null) {
                 $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_REVIEW);
-                $this->log($run, 'info', 'Coding agent review started', array_merge(
+                $startLog = $this->log($run, 'info', 'Coding agent review started', array_merge(
                     $this->agentLogContext($run, 'review'),
                     ['attempt' => $attempt],
                 ));
 
                 $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
+                $this->mergeAgentCommandContext($startLog, $agentResult);
                 $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_REVIEW, $agentResult);
                 $this->logAgentMessages($run, $agentResult);
 
@@ -583,6 +687,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     return;
                 }
 
+                $reviewFeedback = $this->buildReviewFeedback($agentResult);
+
                 if (! $this->allowsRetry($attempt, $retryLimit)) {
                     $this->log($run, 'warning', 'Coding agent review failed after retry limit', [
                         'max_attempts' => $this->retryLimitLabel($retryLimit),
@@ -594,7 +700,38 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                     return;
                 }
 
+                $this->log($run, 'warning', 'Coding agent review failed', [
+                    'attempt' => $attempt,
+                    'max_attempts' => $this->retryLimitLabel($retryLimit),
+                    'error' => $agentResult->error,
+                ]);
+            } else {
+                $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_REVIEW);
+                $startLog = $this->log($run, 'info', 'Coding agent review resumed', array_merge(
+                    $this->agentLogContext($run, 'review'),
+                    ['attempt' => $attempt],
+                ));
+
+                $agentResult = $codingAgent->resumeReview($task, $run, $reviewFeedback, $attempt);
+                $this->mergeAgentCommandContext($startLog, $agentResult);
+                $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_REVIEW, $agentResult);
+                $this->logAgentMessages($run, $agentResult);
+
+                if ($agentResult->successful) {
+                    $this->log($run, 'info', 'Coding agent review passed', [
+                        'attempt' => $attempt,
+                    ]);
+
+                    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+
+                    return;
+                }
+
                 $reviewFeedback = $this->buildReviewFeedback($agentResult);
+
+                if (! $this->allowsRetry($attempt, $retryLimit)) {
+                    throw new Exception((string) $agentResult->error ?: 'Coding agent review resume failed.');
+                }
 
                 $this->log($run, 'warning', 'Coding agent review failed', [
                     'attempt' => $attempt,
@@ -623,29 +760,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'attempt' => $attempt,
             ]);
 
-            $this->throwIfStopRequested($run);
-
-            if (! $this->runTests($repositoryPath, $run)) {
-                $testFailure = trim((string) $run->refresh()->last_error);
-
-                $this->log($run, 'warning', 'Tests failed after review fix; retrying', [
-                    'attempt' => $attempt,
-                    'max_attempts' => $this->retryLimitLabel($retryLimit),
-                    'error' => $testFailure,
-                ]);
-
-                $reviewFeedback = $this->reviewFixTestFailureFeedback($testFailure);
-
-                continue;
-            }
-
-            $reviewFeedback = null;
-        }
-
-        if ($reviewFeedback !== null) {
-            throw new Exception($testFailure !== null && $testFailure !== ''
-                ? "Tests failed after review fix.\n\n{$testFailure}"
-                : 'Tests failed after review fix.');
+            $reviewFeedback = $this->reviewFixFeedback($run, $attempt);
         }
 
         $run->markCheckpointSkipped(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
@@ -658,13 +773,11 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return $retryLimit === -1 || $retryLimit > 0 ? $retryLimit : 1;
     }
 
-    private function reviewFixTestFailureFeedback(string $testFailure): string
+    private function reviewFixFeedback(TaskRun $run, int $attempt): string
     {
-        $testFailure = trim($testFailure);
+        $branch = $run->base_branch ?: 'main';
 
-        return $testFailure !== ''
-            ? "Tests failed after review fix.\n\n{$testFailure}\n\nMake the smallest correct fix, preserve unrelated work, and rerun the relevant tests."
-            : 'Tests failed after review fix. Make the smallest correct fix and preserve unrelated work.';
+        return "The implementation changes for review attempt {$attempt} are complete.\n\nRe-review the latest diff against {$branch} and any related changed tests. Confirm whether the review findings are fully resolved, or return the remaining actionable findings only.";
     }
 
     private function allowsAttempt(int $attempt, int $retryLimit): bool
@@ -1040,7 +1153,6 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $invocation = $agentResult->invocation ?? new CodingAgentInvocation(
             command: is_array($agentResult->context['command'] ?? null) ? $agentResult->context['command'] : [],
             sessionId: is_string($agentResult->context['session_id'] ?? null) ? $agentResult->context['session_id'] : null,
-            resumeCommand: is_string($agentResult->context['resume_command'] ?? null) ? $agentResult->context['resume_command'] : null,
             model: is_string($agentResult->context['model'] ?? null) ? $agentResult->context['model'] : null,
             reasoningEffort: is_string($agentResult->context['reasoning_effort'] ?? null) ? $agentResult->context['reasoning_effort'] : null,
             usage: is_array($agentResult->context['usage'] ?? null) ? $agentResult->context['usage'] : [],

@@ -23,7 +23,6 @@ class TaskRunPhaseSessionFactory extends Factory
             'phase' => $this->faker->randomElement(TaskRunPhaseSession::PHASES),
             'status' => TaskRunPhaseSession::STATUS_PENDING,
             'session_id' => null,
-            'resume_command' => null,
             'model' => null,
             'reasoning_effort' => null,
             'attempt_count' => 0,

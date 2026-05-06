@@ -13,7 +13,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'phase',
     'status',
     'session_id',
-    'resume_command',
     'model',
     'reasoning_effort',
     'attempt_count',

@@ -20,6 +20,8 @@ interface CodingAgent extends Agent
 
     public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult;
 
+    public function resumeReview(Task $task, TaskRun $run, string $feedback, int $attempt): CodingAgentResult;
+
     public function fixReviewFindings(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): CodingAgentResult;
 
     public function generateCommitMessage(Task $task, TaskRun $run): CodingAgentResult;

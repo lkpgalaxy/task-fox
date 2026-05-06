@@ -155,7 +155,7 @@ class TaskController extends Controller
                     'task_runs.workflow_state',
                 ]),
                 'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,analyze_source_model,analyze_source_reasoning_effort,plan_model,plan_reasoning_effort,implement_model,implement_reasoning_effort,review_model,review_reasoning_effort,commit_message_model,commit_message_reasoning_effort,updated_at',
-                'taskRuns.phaseSessions:id,task_run_id,phase,status,session_id,resume_command,model,reasoning_effort,attempt_count,input_tokens,cached_input_tokens,output_tokens,total_tokens,total_cost_usd,command,last_error,started_at,finished_at,updated_at',
+                'taskRuns.phaseSessions:id,task_run_id,phase,status,session_id,model,reasoning_effort,attempt_count,input_tokens,cached_input_tokens,output_tokens,total_tokens,total_cost_usd,command,last_error,started_at,finished_at,updated_at',
                 'taskRuns.logs' => fn ($query) => $query
                     ->select(['id', 'task_run_id', 'level', 'message', 'context', 'created_at'])
                     ->orderByDesc('created_at')
@@ -802,7 +802,6 @@ class TaskController extends Controller
                         'phase' => $phaseSession->phase,
                         'status' => $phaseSession->status,
                         'session_id' => $phaseSession->phase === 'test' ? null : $phaseSession->session_id,
-                        'resume_command' => $phaseSession->phase === 'test' ? null : $phaseSession->resume_command,
                         'model' => $phaseSession->model,
                         'reasoning_effort' => $phaseSession->reasoning_effort,
                         'attempt_count' => $phaseSession->attempt_count,

@@ -8,6 +8,7 @@ use App\DataTransferObjects\CodingAgentResult;
 use App\Models\InputSource;
 use App\Models\Task;
 use App\Models\TaskRun;
+use App\Models\TaskRunPhaseSession;
 use App\Services\SystemSettingsResolver;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Storage;
@@ -41,7 +42,6 @@ class CodexCodingAgent implements CodingAgent
             failureMessage: 'Coding agent command failed.',
             model: $this->resolveRunSetting($run, 'implement_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
-            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
@@ -60,7 +60,6 @@ class CodexCodingAgent implements CodingAgent
             failureMessage: 'Coding agent planning command failed.',
             model: $this->resolveRunSetting($run, 'plan_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'plan_reasoning_effort'),
-            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId),
         );
 
         if (! $result->successful) {
@@ -88,87 +87,50 @@ class CodexCodingAgent implements CodingAgent
 
     public function reviewChanges(Task $task, TaskRun $run, int $attempt): CodingAgentResult
     {
-        $repositoryPath = $this->resolveWorkspacePath($run);
-        $outputPath = $this->makeTemporaryOutputPath('codex-review-');
+        return $this->executeReviewCommand(
+            $run,
+            fn (string $outputPath): array => $this->buildReviewCommand(
+                $task,
+                $run,
+                $this->buildReviewPrompt($task, $run, $attempt),
+                $outputPath,
+                $this->resolveRunSetting($run, 'review_model'),
+                $this->resolveRunSetting($run, 'review_reasoning_effort'),
+            ),
+        );
+    }
 
-        if ($outputPath === '') {
+    public function resumeReview(Task $task, TaskRun $run, string $feedback, int $attempt): CodingAgentResult
+    {
+        $sessionId = $this->persistedSessionId($run, TaskRunPhaseSession::PHASE_REVIEW);
+
+        if ($sessionId === null) {
             return new CodingAgentResult(
                 successful: false,
-                error: 'Unable to create a temporary file for Codex review output.',
+                error: 'No persisted review session is available to resume.',
             );
         }
 
-        try {
-            $result = $this->executeJsonCommand(
-                command: $this->buildReviewCommand(
-                    $task,
-                    $run,
-                    $this->buildReviewPrompt($task, $run, $attempt),
-                    $outputPath,
-                    $this->resolveRunSetting($run, 'review_model'),
-                    $this->resolveRunSetting($run, 'review_reasoning_effort'),
-                ),
-                repositoryPath: $repositoryPath,
-                run: $run,
-                successMessage: 'Coding agent review command completed.',
-                failureMessage: 'Coding agent review command failed.',
-                model: $this->resolveRunSetting($run, 'review_model'),
-                reasoningEffort: $this->resolveRunSetting($run, 'review_reasoning_effort'),
-                resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId),
-            );
-            $rawOutput = trim((string) @file_get_contents($outputPath));
-            $reviewText = $rawOutput !== '' ? $rawOutput : $this->primaryAgentOutput($result);
-
-            if (! $result->successful) {
-                return $result;
-            }
-
-            if ($reviewText === '') {
-                return new CodingAgentResult(
-                    successful: false,
-                    messages: $result->messages,
-                    error: 'Coding agent review returned no output.',
-                    payload: [
-                        'review_text' => $reviewText,
-                    ],
-                    invocation: $result->invocation,
-                );
-            }
-
-            $payload = [
-                'review_text' => $reviewText,
-            ];
-
-            if (! $this->reviewTextHasFindings($run, $reviewText)) {
-                return new CodingAgentResult(
-                    successful: true,
-                    messages: $result->messages,
-                    payload: $payload,
-                    invocation: $result->invocation,
-                );
-            }
-
-            return new CodingAgentResult(
-                successful: false,
-                messages: $result->messages,
-                error: $reviewText,
-                payload: $payload,
-                invocation: $result->invocation,
-            );
-        } finally {
-            if (is_file($outputPath)) {
-                @unlink($outputPath);
-            }
-        }
+        return $this->executeReviewCommand(
+            $run,
+            fn (string $outputPath): array => $this->buildResumeCommand(
+                $sessionId,
+                $this->buildReviewRetryPrompt($task, $run, $feedback, $attempt),
+                $this->resolveRunSetting($run, 'review_model'),
+                $this->resolveRunSetting($run, 'review_reasoning_effort'),
+                false,
+                $outputPath,
+            ),
+            'Coding agent review resume completed.',
+            'Coding agent review resume failed.',
+        );
     }
 
     public function resumeImplementation(Task $task, TaskRun $run, string $feedback, int $attempt): CodingAgentResult
     {
-        $sessionId = $run->phaseSessions()
-            ->where('phase', 'implement')
-            ->value('session_id');
+        $sessionId = $this->persistedSessionId($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
 
-        if (! is_string($sessionId) || trim($sessionId) === '') {
+        if ($sessionId === null) {
             return new CodingAgentResult(
                 successful: false,
                 error: 'No persisted implementation session is available to resume.',
@@ -189,7 +151,6 @@ class CodexCodingAgent implements CodingAgent
             failureMessage: 'Coding agent implementation resume failed.',
             model: $this->resolveRunSetting($run, 'implement_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
-            resumeCommandFactory: fn (string $persistedSessionId): string => $this->buildResumeCommandString($persistedSessionId, true),
         );
     }
 
@@ -209,7 +170,6 @@ class CodexCodingAgent implements CodingAgent
             failureMessage: 'Screenshot verification command failed.',
             model: $this->resolveRunSetting($run, 'implement_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
-            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
@@ -229,7 +189,6 @@ class CodexCodingAgent implements CodingAgent
             failureMessage: 'URL smoke test command failed.',
             model: $this->resolveRunSetting($run, 'implement_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
-            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
@@ -318,7 +277,6 @@ PROMPT;
             failureMessage: 'Coding agent commit message command failed.',
             model: $this->resolveRunSetting($run, 'commit_message_model'),
             reasoningEffort: $this->resolveRunSetting($run, 'commit_message_reasoning_effort'),
-            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
 
         if (! $result->successful) {
@@ -532,6 +490,29 @@ Instructions:
 PROMPT;
     }
 
+    private function buildReviewRetryPrompt(Task $task, TaskRun $run, string $feedback, int $attempt): string
+    {
+        $feedback = $this->limitPromptText($feedback, 12000);
+
+        return <<<PROMPT
+Continue the review session for task {$task->id}: {$task->title}
+
+Review attempt:
+{$attempt}
+
+Context:
+{$feedback}
+
+Instructions:
+- Resume the existing review session instead of restarting from scratch.
+- Re-review the latest diff against the base branch and related changed tests.
+- Do not edit files.
+- Focus on remaining bugs, regressions, missing tests, and correctness issues.
+- If the patch is ready with no actionable findings, reply with a short pass statement.
+- Otherwise return concise actionable findings with enough detail to fix them.
+PROMPT;
+    }
+
     private function limitPromptText(string $text, int $limit): string
     {
         $text = trim($text);
@@ -736,7 +717,6 @@ PAYLOAD;
 
     /**
      * @param  list<string>  $command
-     * @param  callable(string): string|null  $resumeCommandFactory
      */
     private function executeJsonCommand(
         array $command,
@@ -746,7 +726,6 @@ PAYLOAD;
         string $failureMessage,
         ?string $model = null,
         ?string $reasoningEffort = null,
-        ?callable $resumeCommandFactory = null,
     ): CodingAgentResult {
         $process = new Process($command, $repositoryPath);
         $process->setTimeout(null);
@@ -772,9 +751,6 @@ PAYLOAD;
         $invocation = new CodingAgentInvocation(
             command: $command,
             sessionId: $summary->sessionId,
-            resumeCommand: $summary->sessionId !== null && $resumeCommandFactory !== null
-                ? $resumeCommandFactory($summary->sessionId)
-                : null,
             model: $summary->model ?? $model,
             reasoningEffort: $reasoningEffort,
             usage: $summary->usage(),
@@ -927,6 +903,7 @@ PAYLOAD;
         ?string $model = null,
         ?string $reasoningEffort = null,
         bool $bypassApprovals = false,
+        ?string $outputPath = null,
     ): array {
         return [
             $this->codexExecutable(),
@@ -937,19 +914,97 @@ PAYLOAD;
             ...$this->modelArguments($model),
             ...$this->reasoningEffortArguments($reasoningEffort),
             ...($bypassApprovals ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+            ...($outputPath !== null ? ['--output-last-message', $outputPath] : []),
             $prompt,
         ];
     }
 
-    private function buildResumeCommandString(string $sessionId, bool $bypassApprovals = false): string
-    {
-        $command = ['codex', 'exec', 'resume', $sessionId, '--json'];
+    /**
+     * @param  callable(string): list<string>  $commandFactory
+     */
+    private function executeReviewCommand(
+        TaskRun $run,
+        callable $commandFactory,
+        string $successMessage = 'Coding agent review command completed.',
+        string $failureMessage = 'Coding agent review command failed.',
+    ): CodingAgentResult {
+        $repositoryPath = $this->resolveWorkspacePath($run);
+        $outputPath = $this->makeTemporaryOutputPath('codex-review-');
 
-        if ($bypassApprovals) {
-            $command[] = '--dangerously-bypass-approvals-and-sandbox';
+        if ($outputPath === '') {
+            return new CodingAgentResult(
+                successful: false,
+                error: 'Unable to create a temporary file for Codex review output.',
+            );
         }
 
-        return implode(' ', $command);
+        try {
+            $result = $this->executeJsonCommand(
+                command: $commandFactory($outputPath),
+                repositoryPath: $repositoryPath,
+                run: $run,
+                successMessage: $successMessage,
+                failureMessage: $failureMessage,
+                model: $this->resolveRunSetting($run, 'review_model'),
+                reasoningEffort: $this->resolveRunSetting($run, 'review_reasoning_effort'),
+            );
+            $rawOutput = trim((string) @file_get_contents($outputPath));
+            $reviewText = $rawOutput !== '' ? $rawOutput : $this->primaryAgentOutput($result);
+
+            if (! $result->successful) {
+                return $result;
+            }
+
+            if ($reviewText === '') {
+                return new CodingAgentResult(
+                    successful: false,
+                    messages: $result->messages,
+                    error: 'Coding agent review returned no output.',
+                    payload: [
+                        'review_text' => $reviewText,
+                    ],
+                    invocation: $result->invocation,
+                );
+            }
+
+            $payload = [
+                'review_text' => $reviewText,
+            ];
+
+            if (! $this->reviewTextHasFindings($run, $reviewText)) {
+                return new CodingAgentResult(
+                    successful: true,
+                    messages: $result->messages,
+                    payload: $payload,
+                    invocation: $result->invocation,
+                );
+            }
+
+            return new CodingAgentResult(
+                successful: false,
+                messages: $result->messages,
+                error: $reviewText,
+                payload: $payload,
+                invocation: $result->invocation,
+            );
+        } finally {
+            if (is_file($outputPath)) {
+                @unlink($outputPath);
+            }
+        }
+    }
+
+    private function persistedSessionId(TaskRun $run, string $phase): ?string
+    {
+        $sessionId = $run->phaseSessions()
+            ->where('phase', $phase)
+            ->value('session_id');
+
+        if (! is_string($sessionId) || trim($sessionId) === '') {
+            return null;
+        }
+
+        return trim($sessionId);
     }
 
     private function codexExecutable(): string
