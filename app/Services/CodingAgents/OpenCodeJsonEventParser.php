@@ -16,6 +16,7 @@ class OpenCodeJsonEventParser
         $rawTextLines = [];
         $errorMessage = null;
         $errorEventJson = null;
+        $toolErrors = [];
         $inputTokens = 0;
         $cachedInputTokens = 0;
         $outputTokens = 0;
@@ -60,6 +61,10 @@ class OpenCodeJsonEventParser
                 $errorMessage ??= $this->extractErrorMessage($event);
                 $errorEventJson ??= json_encode($event);
             }
+
+            foreach ($this->extractToolErrors($event) as $toolError) {
+                $toolErrors[] = $toolError;
+            }
         }
 
         if ($totalTokens === 0) {
@@ -73,6 +78,7 @@ class OpenCodeJsonEventParser
             rawTextLines: $rawTextLines,
             errorMessage: $errorMessage,
             errorEventJson: $errorEventJson,
+            toolErrors: array_values($this->uniqueToolErrors($toolErrors)),
             inputTokens: $inputTokens,
             cachedInputTokens: $cachedInputTokens,
             outputTokens: $outputTokens,
@@ -132,6 +138,7 @@ class OpenCodeJsonEventParser
         $fragments = [];
 
         foreach ([
+            Arr::get($event, 'part'),
             Arr::get($event, 'message'),
             Arr::get($event, 'assistant'),
             Arr::get($event, 'result'),
@@ -222,5 +229,116 @@ class OpenCodeJsonEventParser
         }
 
         return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $event
+     * @return list<array{tool_name: string|null, message: string, status: string, payload: array<string, mixed>}>
+     */
+    private function extractToolErrors(array $event): array
+    {
+        $toolErrors = [];
+
+        foreach ($this->collectToolUseCandidates($event) as $candidate) {
+            $status = Arr::get($candidate, 'state.status');
+
+            if (! is_string($status) || trim($status) !== 'error') {
+                continue;
+            }
+
+            $message = $this->extractToolErrorMessage($candidate);
+
+            if ($message === null) {
+                continue;
+            }
+
+            $toolName = Arr::get($candidate, 'name');
+
+            $toolErrors[] = [
+                'tool_name' => is_string($toolName) && trim($toolName) !== '' ? trim($toolName) : null,
+                'message' => $message,
+                'status' => 'error',
+                'payload' => $candidate,
+            ];
+        }
+
+        return $toolErrors;
+    }
+
+    /**
+     * @param  array<string, mixed>  $value
+     * @return list<array<string, mixed>>
+     */
+    private function collectToolUseCandidates(array $value): array
+    {
+        $candidates = [];
+
+        if (($value['type'] ?? null) === 'tool_use') {
+            $candidates[] = $value;
+        }
+
+        if (isset($value['tool_use']) && is_array($value['tool_use'])) {
+            $candidates[] = $value['tool_use'];
+        }
+
+        foreach ($value as $nested) {
+            if (is_array($nested)) {
+                foreach ($this->collectToolUseCandidates($nested) as $candidate) {
+                    $candidates[] = $candidate;
+                }
+            }
+        }
+
+        return $candidates;
+    }
+
+    /**
+     * @param  array<string, mixed>  $toolUse
+     */
+    private function extractToolErrorMessage(array $toolUse): ?string
+    {
+        foreach ([
+            'state.error.message',
+            'state.error.data.message',
+            'state.message',
+            'error.message',
+            'message',
+            'name',
+        ] as $path) {
+            $value = Arr::get($toolUse, $path);
+
+            if (is_string($value) && trim($value) !== '') {
+                return trim($value);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  list<array{tool_name: string|null, message: string, status: string, payload: array<string, mixed>}>  $toolErrors
+     * @return list<array{tool_name: string|null, message: string, status: string, payload: array<string, mixed>}>
+     */
+    private function uniqueToolErrors(array $toolErrors): array
+    {
+        $uniqueToolErrors = [];
+        $seen = [];
+
+        foreach ($toolErrors as $toolError) {
+            $key = json_encode([
+                'tool_name' => $toolError['tool_name'],
+                'message' => $toolError['message'],
+                'status' => $toolError['status'],
+            ]);
+
+            if (! is_string($key) || isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $uniqueToolErrors[] = $toolError;
+        }
+
+        return $uniqueToolErrors;
     }
 }

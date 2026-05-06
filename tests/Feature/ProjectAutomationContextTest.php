@@ -14,10 +14,12 @@ use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
+use App\Models\TaskRunPhaseSession;
 use App\Models\User;
 use App\Services\CodingAgents\CodexCodingAgent;
 use Illuminate\Auth\Middleware\Authenticate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Queue\MaxAttemptsExceededException;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Mockery\MockInterface;
@@ -1637,6 +1639,96 @@ test('RunApprovedTaskWithCodingAgentJob stops when a stop request is present bef
         ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
         ->and($run->last_error)->toBe('Task run stopped by user.')
         ->and($run->logs()->where('message', 'Task run stopped')->exists())->toBeTrue();
+});
+
+test('RunApprovedTaskWithCodingAgentJob failed method reconciles queue failures and stays idempotent', function () {
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Queue failure reconciliation');
+    $task->update(['status' => Task::STATUS_RUNNING]);
+    $task->externalTaskLink()->create([
+        'external_task_provider' => 'github',
+        'external_task_id' => 'queue-failure-reconciliation',
+        'external_url' => 'https://github.com/example/task/issues/1',
+    ]);
+
+    $run = createAutomationRun($task, $repositoryPath, 'task/queue-failure-reconciliation');
+    $run->initializeWorkflowState($task);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION);
+    $run->markCheckpointRunning(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+    $run->update(['status' => TaskRun::STATUS_REVIEWING_CHANGES]);
+    $run->phaseSessions()->create([
+        'phase' => TaskRunPhaseSession::PHASE_REVIEW,
+        'status' => TaskRunPhaseSession::STATUS_RUNNING,
+        'attempt_count' => 1,
+        'started_at' => now(),
+    ]);
+
+    $queueFailure = new MaxAttemptsExceededException(
+        RunApprovedTaskWithCodingAgentJob::class.' has been attempted too many times.',
+    );
+
+    $job = new RunApprovedTaskWithCodingAgentJob($run->id);
+    $job->failed($queueFailure);
+    $job->failed(new MaxAttemptsExceededException('Queue worker reported a duplicate failure.'));
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_FAILED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_FAILED)
+        ->and($run->finished_at)->not->toBeNull()
+        ->and($run->last_error)->toBe($queueFailure->getMessage())
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['error'])->toBe($queueFailure->getMessage())
+        ->and($run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_REVIEW)->value('status'))->toBe(TaskRunPhaseSession::STATUS_FAILED)
+        ->and($run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_REVIEW)->value('last_error'))->toBe($queueFailure->getMessage())
+        ->and($run->logs()->where('message', 'Task run failed')->count())->toBe(1)
+        ->and($task->externalTaskLink()->firstOrFail()->messages()->count())->toBe(1)
+        ->and($task->externalTaskLink()->firstOrFail()->messages()->value('error'))->toBe($queueFailure->getMessage());
+});
+
+test('RunApprovedTaskWithCodingAgentJob failed method preserves stop request terminal state', function () {
+    $repositoryPath = createCleanGitRepository();
+    $task = createApprovedAutomationTask($repositoryPath, 'Queue failure stop preservation');
+    $task->update([
+        'status' => Task::STATUS_REJECTED,
+        'rejected_at' => now(),
+    ]);
+    $task->externalTaskLink()->create([
+        'external_task_provider' => 'github',
+        'external_task_id' => 'queue-failure-stop-preservation',
+        'external_url' => 'https://github.com/example/task/issues/2',
+    ]);
+
+    $run = createAutomationRun($task, $repositoryPath, 'task/queue-failure-stop-preservation');
+    $run->initializeWorkflowState($task);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_REPOSITORY_PREPARED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_PLANNED);
+    $run->markCheckpointCompleted(TaskRun::CHECKPOINT_IMPLEMENTATION);
+    $run->markCheckpointRunning(TaskRun::CHECKPOINT_CHANGES_REVIEWED);
+    $run->update(['status' => TaskRun::STATUS_REVIEWING_CHANGES]);
+    $run->phaseSessions()->create([
+        'phase' => TaskRunPhaseSession::PHASE_REVIEW,
+        'status' => TaskRunPhaseSession::STATUS_RUNNING,
+        'attempt_count' => 1,
+        'started_at' => now(),
+    ]);
+    $run->requestStop(null, 'Task rejected.');
+
+    (new RunApprovedTaskWithCodingAgentJob($run->id))->failed(
+        new MaxAttemptsExceededException(RunApprovedTaskWithCodingAgentJob::class.' has been attempted too many times.'),
+    );
+
+    expect($task->refresh()->status)->toBe(Task::STATUS_REJECTED)
+        ->and($run->refresh()->status)->toBe(TaskRun::STATUS_REJECTED)
+        ->and($run->finished_at)->not->toBeNull()
+        ->and($run->last_error)->toBe('Task rejected.')
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['status'])->toBe(TaskRun::CHECKPOINT_STATUS_FAILED)
+        ->and($run->checkpoint(TaskRun::CHECKPOINT_CHANGES_REVIEWED)['error'])->toBe('Task rejected.')
+        ->and($run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_REVIEW)->value('status'))->toBe(TaskRunPhaseSession::STATUS_FAILED)
+        ->and($run->phaseSessions()->where('phase', TaskRunPhaseSession::PHASE_REVIEW)->value('last_error'))->toBe('Task rejected.')
+        ->and($run->logs()->where('message', 'Task run stopped')->count())->toBe(1)
+        ->and($run->logs()->where('message', 'Task run failed')->count())->toBe(0)
+        ->and($task->externalTaskLink()->firstOrFail()->messages()->count())->toBe(0);
 });
 
 test('RunApprovedTaskWithCodingAgentJob logs model metadata for agent phases', function () {

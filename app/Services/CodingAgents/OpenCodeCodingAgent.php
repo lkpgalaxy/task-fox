@@ -80,6 +80,7 @@ class OpenCodeCodingAgent implements CodingAgent
                 messages: $result->messages,
                 error: 'OpenCode did not return an implementation plan.',
                 invocation: $result->invocation,
+                context: $result->context,
             );
         }
 
@@ -88,6 +89,7 @@ class OpenCodeCodingAgent implements CodingAgent
             messages: $result->messages,
             payload: ['plan' => $plan],
             invocation: $result->invocation,
+            context: $result->context,
         );
     }
 
@@ -236,6 +238,7 @@ class OpenCodeCodingAgent implements CodingAgent
                 messages: $result->messages,
                 error: 'OpenCode did not return a commit message.',
                 invocation: $result->invocation,
+                context: $result->context,
             );
         }
 
@@ -244,6 +247,7 @@ class OpenCodeCodingAgent implements CodingAgent
             messages: $result->messages,
             payload: ['message' => $subject],
             invocation: $result->invocation,
+            context: $result->context,
         );
     }
 
@@ -375,12 +379,15 @@ class OpenCodeCodingAgent implements CodingAgent
             usage: $summary->usage(),
         );
 
-        if ($summary->hasError() || ! $process->isSuccessful() || $assistantOutput === '') {
+        $outcome = $this->resolveTaskPhaseOutcome($summary, $assistantOutput, $stderr, $stdout, $process->isSuccessful(), $failureMessage);
+
+        if (! $outcome['successful']) {
             return new CodingAgentResult(
                 successful: false,
-                messages: $this->commandMessages($successMessage, $assistantOutput, $stderr, $stdout),
-                error: $this->failureMessage($summary, $stderr, $stdout, $failureMessage),
+                messages: $this->commandMessages($failureMessage, $assistantOutput, $stderr, $stdout),
+                error: $outcome['error'],
                 invocation: $invocation,
+                context: $outcome['context'],
             );
         }
 
@@ -388,6 +395,7 @@ class OpenCodeCodingAgent implements CodingAgent
             successful: true,
             messages: $this->commandMessages($successMessage, $assistantOutput, $stderr, $stdout),
             invocation: $invocation,
+            context: $outcome['context'],
         );
     }
 
@@ -423,6 +431,7 @@ class OpenCodeCodingAgent implements CodingAgent
                 error: 'OpenCode review returned no output.',
                 payload: ['review_text' => $reviewText],
                 invocation: $result->invocation,
+                context: $result->context,
             );
         }
 
@@ -434,6 +443,7 @@ class OpenCodeCodingAgent implements CodingAgent
                 messages: $result->messages,
                 payload: $payload,
                 invocation: $result->invocation,
+                context: $result->context,
             );
         }
 
@@ -443,6 +453,7 @@ class OpenCodeCodingAgent implements CodingAgent
             error: $reviewText,
             payload: $payload,
             invocation: $result->invocation,
+            context: $result->context,
         );
     }
 
@@ -547,6 +558,68 @@ class OpenCodeCodingAgent implements CodingAgent
     private function assistantOutput(OpenCodeJsonEventSummary $summary): string
     {
         return trim(implode("\n\n", $summary->messages));
+    }
+
+    /**
+     * @return array{successful: bool, error: string|null, context: array<string, mixed>}
+     */
+    private function resolveTaskPhaseOutcome(
+        OpenCodeJsonEventSummary $summary,
+        string $assistantOutput,
+        string $stderr,
+        string $stdout,
+        bool $processSuccessful,
+        string $fallback,
+    ): array {
+        $context = $this->taskPhaseOutcomeContext($summary, $assistantOutput, $stderr, $stdout);
+
+        if ($summary->hasError()) {
+            return [
+                'successful' => false,
+                'error' => $this->failureMessage($summary, $stderr, $stdout, $fallback),
+                'context' => $context,
+            ];
+        }
+
+        if ($summary->hasAssistantOutput()) {
+            return [
+                'successful' => true,
+                'error' => null,
+                'context' => $context,
+            ];
+        }
+
+        if (! $processSuccessful) {
+            return [
+                'successful' => false,
+                'error' => $this->failureMessage($summary, $stderr, $stdout, $fallback),
+                'context' => $context,
+            ];
+        }
+
+        return [
+            'successful' => false,
+            'error' => $this->failureMessage($summary, $stderr, $stdout, $fallback),
+            'context' => $context,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function taskPhaseOutcomeContext(
+        OpenCodeJsonEventSummary $summary,
+        string $assistantOutput,
+        string $stderr,
+        string $stdout,
+    ): array {
+        return array_filter([
+            'assistant_output' => $assistantOutput !== '' ? $assistantOutput : null,
+            'raw_stdout' => $stdout !== '' ? $stdout : null,
+            'raw_stderr' => $stderr !== '' ? $stderr : null,
+            'tool_errors' => $summary->toolErrors !== [] ? $summary->toolErrors : null,
+            'opencode_error_event_json' => $summary->errorEventJson,
+        ], static fn (mixed $value): bool => $value !== null);
     }
 
     /**

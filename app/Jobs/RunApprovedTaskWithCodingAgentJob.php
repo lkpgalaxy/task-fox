@@ -102,63 +102,15 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'pull_request_url' => $run->pull_request_url,
             ]);
         } catch (Throwable $exception) {
-            $run->refresh();
-            $checkpoint = $run->runningCheckpoint() ?? $run->nextRunnableCheckpoint();
-            if ($checkpoint !== null) {
-                $run->markCheckpointFailed($checkpoint, $exception->getMessage());
-            }
-            $this->markActivePhaseFailed($run, $exception->getMessage());
-
-            if ($run->stopRequested()) {
-                $task->refresh();
-
-                if (! in_array($task->status, [Task::STATUS_REJECTED, Task::STATUS_FAILED], true)) {
-                    $task->update([
-                        'status' => Task::STATUS_FAILED,
-                    ]);
-                    $task->refresh();
-                }
-
-                $stopMessage = $run->stopRequestMessage($exception->getMessage());
-                $run->update([
-                    'status' => $task->status === Task::STATUS_REJECTED
-                        ? TaskRun::STATUS_REJECTED
-                        : TaskRun::STATUS_FAILED,
-                    'last_error' => $stopMessage,
-                    'finished_at' => now(),
-                ]);
-
-                $this->log($run, 'warning', 'Task run stopped', [
-                    'error' => $stopMessage,
-                ]);
-            } else {
-                $task->update([
-                    'status' => Task::STATUS_FAILED,
-                ]);
-
-                $run->update([
-                    'status' => TaskRun::STATUS_FAILED,
-                    'last_error' => $exception->getMessage(),
-                    'finished_at' => now(),
-                ]);
-
-                $this->log($run, 'error', 'Task run failed', [
-                    'error' => $exception->getMessage(),
-                ]);
-
-                if ($task->externalTaskLink) {
-                    $task->externalTaskLink->messages()->create([
-                        'type' => 'attempt',
-                        'payload' => ['run_id' => $run->id],
-                        'status' => 'failed',
-                        'error' => $exception->getMessage(),
-                        'sent_at' => now(),
-                    ]);
-                }
-            }
+            $this->finalizeFailure($exception->getMessage());
         } finally {
             DispatchNextTaskRunJob::dispatch();
         }
+    }
+
+    public function failed(?Throwable $exception): void
+    {
+        $this->finalizeFailure($exception?->getMessage() ?? 'Task run failed.');
     }
 
     private function makeBranchName(TaskRun $run, Task $task): string
@@ -1034,6 +986,82 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         return app(TaskRunPhaseSessionRecorder::class);
     }
 
+    private function finalizeFailure(string $error): void
+    {
+        $run = TaskRun::with(['task.externalTaskLink'])->find($this->taskRunId)?->fresh(['task.externalTaskLink']);
+
+        if ($run === null || ! $run->task) {
+            return;
+        }
+
+        $task = $run->task;
+        $stopRequested = $run->stopRequested();
+        $finalMessage = $stopRequested ? $run->stopRequestMessage($error) : $error;
+
+        if ($this->runAlreadyFinalized($run)) {
+            $this->markTaskFailedIfNeeded($task);
+
+            return;
+        }
+
+        $this->markActiveCheckpointFailed($run, $finalMessage);
+        $this->markActivePhaseFailed($run, $finalMessage);
+
+        $task = $this->markTaskFailedIfNeeded($task);
+
+        $run->update([
+            'status' => $this->finalRunStatus($run, $task),
+            'last_error' => $this->finalRunError($run, $finalMessage),
+            'finished_at' => $run->finished_at ?? now(),
+        ]);
+        $run->refresh();
+
+        if ($stopRequested) {
+            $this->log($run, 'warning', 'Task run stopped', [
+                'error' => $finalMessage,
+            ]);
+
+            return;
+        }
+
+        $this->log($run, 'error', 'Task run failed', [
+            'error' => $finalMessage,
+        ]);
+
+        if (! $task->externalTaskLink) {
+            return;
+        }
+
+        $task->externalTaskLink->messages()->create([
+            'type' => 'attempt',
+            'payload' => ['run_id' => $run->id],
+            'status' => 'failed',
+            'error' => $finalMessage,
+            'sent_at' => now(),
+        ]);
+    }
+
+    private function markActiveCheckpointFailed(TaskRun $run, string $error): void
+    {
+        $checkpoint = $run->runningCheckpoint() ?? $run->nextRunnableCheckpoint();
+
+        if ($checkpoint === null) {
+            return;
+        }
+
+        $status = (string) Arr::get($run->checkpoint($checkpoint), 'status', TaskRun::CHECKPOINT_STATUS_PENDING);
+
+        if (in_array($status, [
+            TaskRun::CHECKPOINT_STATUS_COMPLETED,
+            TaskRun::CHECKPOINT_STATUS_SKIPPED,
+            TaskRun::CHECKPOINT_STATUS_FAILED,
+        ], true)) {
+            return;
+        }
+
+        $run->markCheckpointFailed($checkpoint, $error);
+    }
+
     private function markActivePhaseFailed(TaskRun $run, string $error): void
     {
         $phase = match ($run->status) {
@@ -1047,7 +1075,82 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             return;
         }
 
+        $phaseSession = $run->phaseSessions()
+            ->where('phase', $phase)
+            ->latest('id')
+            ->first();
+
+        if (! $phaseSession instanceof TaskRunPhaseSession || $this->isTerminalPhaseSessionStatus((string) $phaseSession->status)) {
+            return;
+        }
+
         $this->phaseSessionRecorder()->markFailed($run, $phase, $error);
+    }
+
+    private function markTaskFailedIfNeeded(Task $task): Task
+    {
+        if ($this->isTerminalTaskStatus((string) $task->status)) {
+            return $task;
+        }
+
+        $task->update([
+            'status' => Task::STATUS_FAILED,
+        ]);
+
+        return $task->fresh(['externalTaskLink']) ?? $task;
+    }
+
+    private function finalRunStatus(TaskRun $run, Task $task): string
+    {
+        if ($run->stopRequested()) {
+            return $task->status === Task::STATUS_REJECTED
+                ? TaskRun::STATUS_REJECTED
+                : TaskRun::STATUS_FAILED;
+        }
+
+        return $this->isTerminalRunStatus((string) $run->status)
+            ? (string) $run->status
+            : TaskRun::STATUS_FAILED;
+    }
+
+    private function finalRunError(TaskRun $run, string $error): string
+    {
+        if ($this->isTerminalRunStatus((string) $run->status) && is_string($run->last_error) && trim($run->last_error) !== '') {
+            return $run->last_error;
+        }
+
+        return $error;
+    }
+
+    private function runAlreadyFinalized(TaskRun $run): bool
+    {
+        return $run->finished_at !== null && $this->isTerminalRunStatus((string) $run->status);
+    }
+
+    private function isTerminalRunStatus(string $status): bool
+    {
+        return in_array($status, [
+            TaskRun::STATUS_DONE,
+            TaskRun::STATUS_REJECTED,
+            TaskRun::STATUS_FAILED,
+        ], true);
+    }
+
+    private function isTerminalTaskStatus(string $status): bool
+    {
+        return in_array($status, [
+            Task::STATUS_DONE,
+            Task::STATUS_FAILED,
+            Task::STATUS_REJECTED,
+        ], true);
+    }
+
+    private function isTerminalPhaseSessionStatus(string $status): bool
+    {
+        return in_array($status, [
+            TaskRunPhaseSession::STATUS_COMPLETED,
+            TaskRunPhaseSession::STATUS_FAILED,
+        ], true);
     }
 
     private function recordAgentPhaseResult(TaskRun $run, string $phase, CodingAgentResult $agentResult): void

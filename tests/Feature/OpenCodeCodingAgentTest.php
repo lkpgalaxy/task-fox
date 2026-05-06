@@ -252,6 +252,8 @@ test('opencode treats an exit zero error event as a failed run', function () {
 
     expect($result->successful)->toBeFalse()
         ->and($result->error)->toBe('Token refresh failed: 401')
+        ->and($result->messages)->toContain('OpenCode implementation command failed.')
+        ->and($result->messages)->not->toContain('OpenCode implementation command completed.')
         ->and($result->context['session_id'])->toBe('session-error-123');
 });
 
@@ -292,7 +294,55 @@ test('opencode surfaces non json stdout failures and does not consult session di
 
     expect($result->successful)->toBeFalse()
         ->and($result->error)->toContain('default agent "Sisyphus - Ultraworker" not found')
+        ->and($result->messages)->toContain('OpenCode implementation command failed.')
+        ->and($result->messages)->not->toContain('OpenCode implementation command completed.')
         ->and($result->error)->not->toContain('This file must never be read at runtime.');
+});
+
+test('opencode planning succeeds from json assistant output with recoverable tool errors even on non zero exit', function () {
+    $workspacePath = sys_get_temp_dir().'/task-fox-opencode-plan-tool-error-workspace-'.uniqid();
+    $binPath = sys_get_temp_dir().'/task-fox-opencode-plan-tool-error-bin-'.uniqid();
+
+    mkdir($workspacePath);
+    mkdir($binPath);
+    file_put_contents(
+        $binPath.'/opencode',
+        <<<'SH'
+#!/bin/sh
+cat <<'JSON'
+{"type":"message.completed","sessionID":"session-plan-tool-error-123","model":"openai/gpt-5.5","message":{"content":[{"type":"tool_use","name":"grep","state":{"status":"error","error":{"message":"ripgrep exited with status 2"}}},{"type":"text","text":"<proposed_plan>\n## Plan\n\n- Inspect the affected files.\n</proposed_plan>"}]}}
+JSON
+exit 9
+SH
+    );
+    chmod($binPath.'/opencode', 0755);
+
+    $task = Task::create([
+        'title' => 'Plan after tool recovery',
+        'description' => 'Recoverable tool errors should not fail planning.',
+        'status' => Task::STATUS_APPROVED,
+        'priority' => Task::PRIORITY_MEDIUM,
+    ]);
+    SystemSetting::factory()->create([
+        'plan_model' => 'openai/gpt-5.5',
+        'plan_reasoning_effort' => 'high',
+    ]);
+    $run = TaskRun::create([
+        'task_id' => $task->id,
+        'status' => TaskRun::STATUS_PLANNING,
+        'branch_name' => 'task/recoverable-plan',
+        'workspace_path' => $workspacePath,
+        'base_branch' => 'main',
+    ]);
+
+    $result = (new OpenCodeCodingAgent([
+        'PATH' => $binPath.PATH_SEPARATOR.getenv('PATH'),
+    ]))->plan($task, $run);
+
+    expect($result->successful)->toBeTrue()
+        ->and($result->payload['plan'])->toBe("## Plan\n\n- Inspect the affected files.")
+        ->and($result->context['tool_errors'])->toHaveCount(1)
+        ->and($result->context['tool_errors'][0]['message'])->toBe('ripgrep exited with status 2');
 });
 
 test('opencode analysis accepts plain json output and stored file metadata', function () {
