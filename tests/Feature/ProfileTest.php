@@ -313,6 +313,43 @@ test('users can save and clear their personal automation overrides', function ()
         ->automation_external_task_provider->toBeNull();
 });
 
+test('automation settings and personal overrides accept opencode', function () {
+    configureAutomationDriverOptions();
+
+    $admin = User::factory()->create([
+        'role' => User::ROLE_ADMIN,
+    ]);
+    $user = User::factory()->create();
+
+    SystemSetting::factory()->create([
+        'agent_driver' => 'codex',
+        'coding_agent_driver' => 'codex',
+    ]);
+
+    $this->actingAs($admin)
+        ->patch(route('profile.automation.update'), validAutomationSettingsPayload([
+            'agent_driver' => 'opencode',
+            'coding_agent_driver' => 'opencode',
+        ]))
+        ->assertRedirect(route('profile.edit'));
+
+    expect(SystemSetting::query()->sole())
+        ->agent_driver->toBe('opencode')
+        ->coding_agent_driver->toBe('opencode');
+
+    $this->actingAs($user)
+        ->patch(route('profile.automation.preferences.update'), [
+            'automation_agent_driver' => 'opencode',
+            'automation_coding_agent_driver' => 'opencode',
+            'automation_external_task_provider' => '',
+        ])
+        ->assertRedirect(route('profile.edit'));
+
+    expect($user->refresh())
+        ->automation_agent_driver->toBe('opencode')
+        ->automation_coding_agent_driver->toBe('opencode');
+});
+
 test('automation settings reject invalid driver and provider keys', function () {
     configureAutomationDriverOptions();
 
@@ -366,9 +403,11 @@ function configureAutomationDriverOptions(): void
     config([
         'automation.supported_agent_drivers' => [
             'codex' => 'Codex',
+            'opencode' => 'OpenCode',
         ],
         'automation.supported_coding_agent_drivers' => [
             'codex' => 'Codex',
+            'opencode' => 'OpenCode',
         ],
         'automation.external_task_providers' => [
             'linear' => [

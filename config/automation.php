@@ -5,10 +5,12 @@ use App\Services\PullRequests\GithubPullRequestProvider;
 return [
     'supported_agent_drivers' => [
         'codex' => 'Codex',
+        'opencode' => 'OpenCode',
     ],
 
     'supported_coding_agent_drivers' => [
         'codex' => 'Codex',
+        'opencode' => 'OpenCode',
     ],
 
     'coding_agent' => [

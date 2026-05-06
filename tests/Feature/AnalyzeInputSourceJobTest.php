@@ -9,6 +9,7 @@ use App\Models\SystemSetting;
 use App\Models\Task;
 use App\Models\TaskRunLog;
 use App\Models\User;
+use App\Services\CodingAgents\OpenCodeCodingAgent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -155,6 +156,7 @@ test('queued analysis keeps the uploader agent driver snapshot after settings ch
     config([
         'automation.supported_agent_drivers' => [
             'codex' => 'Codex',
+            'opencode' => 'OpenCode',
         ],
     ]);
 
@@ -206,4 +208,58 @@ test('queued analysis keeps the uploader agent driver snapshot after settings ch
             ->sole()
             ->context['agent'])
         ->toBe('codex');
+});
+
+test('queued analysis logs the selected opencode driver', function () {
+    config([
+        'automation.supported_agent_drivers' => [
+            'codex' => 'Codex',
+            'opencode' => 'OpenCode',
+        ],
+    ]);
+
+    $source = InputSource::create([
+        'title' => 'OpenCode source',
+        'agent_driver' => 'opencode',
+        'analysis_status' => 'pending',
+    ]);
+
+    SystemSetting::factory()->create([
+        'analyze_source_model' => 'openai/gpt-5.4',
+        'analyze_source_reasoning_effort' => 'medium',
+    ]);
+
+    $agent = new class implements Agent
+    {
+        public function analyzeInputSource(InputSource $inputSource, array $projectSummaries): CodingAgentResult
+        {
+            return new CodingAgentResult(
+                successful: true,
+                payload: [
+                    'tasks' => [
+                        [
+                            'title' => 'OpenCode task',
+                            'description' => 'Created with the selected OpenCode driver.',
+                            'project_id' => null,
+                            'assignee_github_username' => null,
+                            'priority' => 'medium',
+                            'deadline' => null,
+                            'questions' => [],
+                        ],
+                    ],
+                ],
+            );
+        }
+    };
+
+    $this->app->instance(OpenCodeCodingAgent::class, $agent);
+
+    app()->call([new AnalyzeInputSourceJob($source->id), 'handle']);
+
+    expect(TaskRunLog::query()
+        ->where('input_source_id', $source->id)
+        ->where('message', 'Input source analysis completed')
+        ->sole()
+        ->context['agent'])
+        ->toBe('opencode');
 });

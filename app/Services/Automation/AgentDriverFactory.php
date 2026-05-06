@@ -4,6 +4,7 @@ namespace App\Services\Automation;
 
 use App\Contracts\Agent;
 use App\Contracts\CodingAgent;
+use App\Services\CodingAgents\OpenCodeCodingAgent;
 use InvalidArgumentException;
 
 class AgentDriverFactory
@@ -54,6 +55,7 @@ class AgentDriverFactory
 
         return match ($driver) {
             'codex' => app(Agent::class),
+            'opencode' => app(OpenCodeCodingAgent::class),
             default => throw new InvalidArgumentException("Unsupported agent driver [{$driver}]."),
         };
     }
@@ -64,6 +66,7 @@ class AgentDriverFactory
 
         return match ($driver) {
             'codex' => app(CodingAgent::class),
+            'opencode' => app(OpenCodeCodingAgent::class),
             default => throw new InvalidArgumentException("Unsupported coding agent driver [{$driver}]."),
         };
     }
