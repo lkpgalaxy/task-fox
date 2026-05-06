@@ -929,7 +929,7 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
         ->and($args[array_search('-c', $args, true) + 1])->toBe('model_reasoning_effort="high"')
         ->and($args)->toContain('--sandbox')
         ->and($args[array_search('--sandbox', $args, true) + 1])->toBe('read-only')
-        ->and($args)->toContain('--ephemeral')
+        ->and($args)->toContain('--json')
         ->and($args)->toContain('-C')
         ->and($args[array_search('-C', $args, true) + 1])->toBe($workspacePath)
         ->and(file_get_contents($argsPath))->toContain('Do not ask the user any questions or request clarification.')
@@ -938,7 +938,7 @@ test('codex planning uses read only ephemeral sandbox and extracts proposed plan
         ->and(file_get_contents($argsPath))->not->toContain('Ask no questions unless');
 });
 
-test('codex review command uses native base branch review mode', function () {
+test('codex review command uses a persisted read only exec prompt', function () {
     $task = Task::create([
         'title' => 'Review with native mode',
         'description' => 'Review should use Codex native review mode.',
@@ -957,17 +957,17 @@ test('codex review command uses native base branch review mode', function () {
 
     $reflection = new ReflectionClass(CodexCodingAgent::class);
     $method = $reflection->getMethod('buildReviewCommand');
-    $command = $method->invoke(new CodexCodingAgent, $task, $run, '/tmp/codex-review-output');
+    $command = $method->invoke(new CodexCodingAgent, $task, $run, 'Review prompt', '/tmp/codex-review-output');
 
     expect($command)
-        ->toContain('review')
-        ->toContain('--base')
-        ->and($command[array_search('--base', $command, true) + 1])->toBe('develop')
-        ->and($command)->toContain('--title')
-        ->and($command[array_search('--title', $command, true) + 1])->toBe('Task '.$task->id.': Review with native mode')
+        ->toContain('exec')
+        ->toContain('--json')
+        ->toContain('--sandbox')
+        ->and($command[array_search('--sandbox', $command, true) + 1])->toBe('read-only')
+        ->and($command)->toContain('-C')
+        ->and($command[array_search('-C', $command, true) + 1])->toBe(base_path())
         ->and($command)->toContain('--output-last-message')
-        ->and($command)->not->toContain('--uncommitted')
-        ->and($command)->not->toContain('Return exactly one JSON object with this shape:');
+        ->and($command[array_key_last($command)])->toBe('Review prompt');
 });
 
 test('codex review classifier uses the codex verdict instead of keyword matching', function () {
@@ -1282,7 +1282,10 @@ test('RunApprovedTaskWithCodingAgentJob uses finite implementation retry limit f
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry implementation once.']));
             $mock->shouldReceive('run')
-                ->twice()
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('resumeImplementation')
+                ->once()
                 ->andReturn(new CodingAgentResult(successful: true));
             $mock->shouldReceive('reviewChanges')
                 ->once()
@@ -1319,7 +1322,10 @@ test('RunApprovedTaskWithCodingAgentJob retries implementation without limit whe
                 ->once()
                 ->andReturn(new CodingAgentResult(successful: true, payload: ['plan' => 'Retry until tests pass.']));
             $mock->shouldReceive('run')
-                ->times(3)
+                ->once()
+                ->andReturn(new CodingAgentResult(successful: true));
+            $mock->shouldReceive('resumeImplementation')
+                ->twice()
                 ->andReturnUsing(function () use ($testsCountPath): CodingAgentResult {
                     if (is_file($testsCountPath) && trim((string) file_get_contents($testsCountPath)) === '2') {
                         config(['automation.tests.command' => 'true']);

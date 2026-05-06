@@ -5,11 +5,14 @@ namespace App\Jobs;
 use App\Contracts\CodingAgent;
 use App\Contracts\ExternalTaskProvider;
 use App\Contracts\PullRequestProvider;
+use App\DataTransferObjects\CodingAgentInvocation;
 use App\DataTransferObjects\CodingAgentResult;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
+use App\Models\TaskRunPhaseSession;
 use App\Models\User;
+use App\Services\Automation\TaskRunPhaseSessionRecorder;
 use Exception;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -100,6 +103,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             if ($checkpoint !== null) {
                 $run->markCheckpointFailed($checkpoint, $exception->getMessage());
             }
+            $this->markActivePhaseFailed($run, $exception->getMessage());
 
             if ($run->stopRequested()) {
                 $task->refresh();
@@ -193,11 +197,13 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
     {
         $run->markCheckpointRunning(TaskRun::CHECKPOINT_PLANNED);
         $run->update(['status' => TaskRun::STATUS_PLANNING]);
+        $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_PLAN);
 
         $startLog = $this->log($run, 'info', 'Coding agent planning started', $this->agentLogContext($run, 'plan'));
 
         $agentResult = $codingAgent->plan($task, $run);
         $this->mergeAgentCommandContext($startLog, $agentResult);
+        $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_PLAN, $agentResult);
         $this->logAgentMessages($run, $agentResult);
 
         if (! $agentResult->successful) {
@@ -207,6 +213,7 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $plan = trim((string) ($agentResult->payload['plan'] ?? ''));
 
         if ($plan === '') {
+            $this->phaseSessionRecorder()->markFailed($run, TaskRunPhaseSession::PHASE_PLAN, 'Coding agent did not return an implementation plan.');
             throw new Exception('Coding agent did not return an implementation plan.');
         }
 
@@ -231,14 +238,23 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 'status' => TaskRun::STATUS_IMPLEMENTING,
                 'attempt_count' => $run->checkpointAttempts(TaskRun::CHECKPOINT_IMPLEMENTATION_VERIFIED),
             ]);
+            $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
 
             $startLog = $this->log($run, 'info', 'Coding agent invocation started', array_merge(
                 $this->agentLogContext($run, 'implement'),
                 ['attempt' => $attempt],
             ));
 
-            $agentResult = $codingAgent->run($task, $run);
+            $agentResult = $attempt === 1
+                ? $codingAgent->run($task, $run)
+                : $codingAgent->resumeImplementation(
+                    $task,
+                    $run,
+                    trim((string) $run->refresh()->last_error),
+                    $attempt,
+                );
             $this->mergeAgentCommandContext($startLog, $agentResult);
+            $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_IMPLEMENT, $agentResult);
             $this->logAgentMessages($run, $agentResult);
 
             if (! $agentResult->successful) {
@@ -463,6 +479,12 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $failureOutput = $this->formatTestFailure($command, $process);
 
         $run->update(['status' => TaskRun::STATUS_TESTING]);
+        $this->phaseSessionRecorder()->recordTestResult(
+            $run,
+            $command,
+            $process->isSuccessful(),
+            $process->isSuccessful() ? null : $failureOutput,
+        );
 
         $this->log($run, 'info', 'Test command executed', [
             'command' => $command,
@@ -484,7 +506,14 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function formatTestFailure(string $command, Process $process): string
     {
+        $combinedOutput = trim($process->getOutput()."\n".$process->getErrorOutput());
+        $failingTests = $this->extractFailingTestNames($combinedOutput);
         $sections = [
+            'Test failure summary for implementation retry:',
+            "Test command: {$command}",
+            $failingTests !== []
+                ? 'Failing tests: '.implode(', ', $failingTests)
+                : 'Concise failure summary: test command failed without a parsed test name.',
             "Verification command failed: {$command}",
             'Exit code: '.(string) $process->getExitCode(),
         ];
@@ -534,12 +563,14 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
             ]);
 
             if ($reviewFeedback === null) {
+                $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_REVIEW);
                 $this->log($run, 'info', 'Coding agent review started', array_merge(
                     $this->agentLogContext($run, 'review'),
                     ['attempt' => $attempt],
                 ));
 
                 $agentResult = $codingAgent->reviewChanges($task, $run, $attempt);
+                $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_REVIEW, $agentResult);
                 $this->logAgentMessages($run, $agentResult);
 
                 if ($agentResult->successful) {
@@ -579,7 +610,9 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
                 ['attempt' => $attempt],
             ));
 
+            $this->phaseSessionRecorder()->start($run, TaskRunPhaseSession::PHASE_IMPLEMENT);
             $fixResult = $codingAgent->fixReviewFindings($task, $run, $reviewFeedback, $attempt);
+            $this->recordAgentPhaseResult($run, TaskRunPhaseSession::PHASE_IMPLEMENT, $fixResult);
             $this->logAgentMessages($run, $fixResult);
 
             if (! $fixResult->successful) {
@@ -630,8 +663,8 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         $testFailure = trim($testFailure);
 
         return $testFailure !== ''
-            ? "Tests failed after review fix.\n\n{$testFailure}"
-            : 'Tests failed after review fix.';
+            ? "Tests failed after review fix.\n\n{$testFailure}\n\nMake the smallest correct fix, preserve unrelated work, and rerun the relevant tests."
+            : 'Tests failed after review fix. Make the smallest correct fix and preserve unrelated work.';
     }
 
     private function allowsAttempt(int $attempt, int $retryLimit): bool
@@ -884,14 +917,12 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
 
     private function mergeAgentCommandContext(TaskRunLog $log, CodingAgentResult $agentResult): void
     {
-        if (! array_key_exists('command', $agentResult->context)) {
+        if ($agentResult->context === []) {
             return;
         }
 
         $log->update([
-            'context' => array_merge($log->context ?? [], [
-                'command' => $agentResult->context['command'],
-            ]),
+            'context' => array_merge($log->context ?? [], $agentResult->context),
         ]);
     }
 
@@ -980,6 +1011,63 @@ class RunApprovedTaskWithCodingAgentJob implements ShouldQueue
         }
 
         return Str::substr($text, 0, $limit)."\n\n[truncated to keep review-fix prompt within OS argument limits]";
+    }
+
+    private function phaseSessionRecorder(): TaskRunPhaseSessionRecorder
+    {
+        return app(TaskRunPhaseSessionRecorder::class);
+    }
+
+    private function markActivePhaseFailed(TaskRun $run, string $error): void
+    {
+        $phase = match ($run->status) {
+            TaskRun::STATUS_PLANNING => TaskRunPhaseSession::PHASE_PLAN,
+            TaskRun::STATUS_IMPLEMENTING => TaskRunPhaseSession::PHASE_IMPLEMENT,
+            TaskRun::STATUS_TESTING => TaskRunPhaseSession::PHASE_TEST,
+            TaskRun::STATUS_REVIEWING_CHANGES => TaskRunPhaseSession::PHASE_REVIEW,
+            default => null,
+        };
+
+        if ($phase === null) {
+            return;
+        }
+
+        $this->phaseSessionRecorder()->markFailed($run, $phase, $error);
+    }
+
+    private function recordAgentPhaseResult(TaskRun $run, string $phase, CodingAgentResult $agentResult): void
+    {
+        $invocation = $agentResult->invocation ?? new CodingAgentInvocation(
+            command: is_array($agentResult->context['command'] ?? null) ? $agentResult->context['command'] : [],
+            sessionId: is_string($agentResult->context['session_id'] ?? null) ? $agentResult->context['session_id'] : null,
+            resumeCommand: is_string($agentResult->context['resume_command'] ?? null) ? $agentResult->context['resume_command'] : null,
+            model: is_string($agentResult->context['model'] ?? null) ? $agentResult->context['model'] : null,
+            reasoningEffort: is_string($agentResult->context['reasoning_effort'] ?? null) ? $agentResult->context['reasoning_effort'] : null,
+            usage: is_array($agentResult->context['usage'] ?? null) ? $agentResult->context['usage'] : [],
+        );
+
+        $this->phaseSessionRecorder()->recordAgentResult(
+            $run,
+            $phase,
+            $invocation,
+            $agentResult->successful,
+            $agentResult->error,
+        );
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extractFailingTestNames(string $output): array
+    {
+        preg_match_all('/(?:FAIL|FAILED)\s+([A-Za-z0-9_\\\\:>\-\s\(\)\[\]\.]+)/', $output, $matches);
+
+        return collect($matches[1] ?? [])
+            ->map(fn (string $name): string => trim($name))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function resolveBaseBranch(TaskRun $run): string

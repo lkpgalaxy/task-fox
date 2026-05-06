@@ -155,6 +155,7 @@ class TaskController extends Controller
                     'task_runs.workflow_state',
                 ]),
                 'taskRuns:id,task_id,status,plan,branch_name,pull_request_url,pull_request_number,attempt_count,review_attempt_count,workflow_state,last_error,started_at,finished_at,analyze_source_model,analyze_source_reasoning_effort,plan_model,plan_reasoning_effort,implement_model,implement_reasoning_effort,review_model,review_reasoning_effort,commit_message_model,commit_message_reasoning_effort,updated_at',
+                'taskRuns.phaseSessions:id,task_run_id,phase,status,session_id,resume_command,model,reasoning_effort,attempt_count,input_tokens,cached_input_tokens,output_tokens,total_tokens,total_cost_usd,command,last_error,started_at,finished_at,updated_at',
                 'taskRuns.logs' => fn ($query) => $query
                     ->select(['id', 'task_run_id', 'level', 'message', 'context', 'created_at'])
                     ->orderByDesc('created_at')
@@ -796,6 +797,28 @@ class TaskController extends Controller
                 'last_error' => $run->last_error,
                 'started_at' => $run->started_at?->toIso8601String(),
                 'finished_at' => $run->finished_at?->toIso8601String(),
+                'phase_sessions' => $run->phaseSessions->map(
+                    fn ($phaseSession) => [
+                        'phase' => $phaseSession->phase,
+                        'status' => $phaseSession->status,
+                        'session_id' => $phaseSession->phase === 'test' ? null : $phaseSession->session_id,
+                        'resume_command' => $phaseSession->phase === 'test' ? null : $phaseSession->resume_command,
+                        'model' => $phaseSession->model,
+                        'reasoning_effort' => $phaseSession->reasoning_effort,
+                        'attempt_count' => $phaseSession->attempt_count,
+                        'usage' => [
+                            'input_tokens' => (int) $phaseSession->input_tokens,
+                            'cached_input_tokens' => (int) $phaseSession->cached_input_tokens,
+                            'output_tokens' => (int) $phaseSession->output_tokens,
+                            'total_tokens' => (int) $phaseSession->total_tokens,
+                        ],
+                        'total_cost_usd' => $phaseSession->total_cost_usd !== null ? (float) $phaseSession->total_cost_usd : null,
+                        'last_error' => $phaseSession->last_error,
+                        'started_at' => $phaseSession->started_at?->toIso8601String(),
+                        'finished_at' => $phaseSession->finished_at?->toIso8601String(),
+                        'updated_at' => $phaseSession->updated_at?->toIso8601String(),
+                    ],
+                )->values(),
                 'logs' => $run->logs->map(
                     fn ($log) => [
                         'id' => $log->id,

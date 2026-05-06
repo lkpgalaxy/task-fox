@@ -180,6 +180,14 @@ class TaskRun extends Model
         return $this->hasMany(TaskRunLog::class);
     }
 
+    /**
+     * @return HasMany<int, TaskRunPhaseSession>
+     */
+    public function phaseSessions(): HasMany
+    {
+        return $this->hasMany(TaskRunPhaseSession::class)->orderBy('id');
+    }
+
     public function isActive(): bool
     {
         return in_array($this->status, self::ACTIVE_STATUSES, true);

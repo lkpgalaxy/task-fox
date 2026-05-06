@@ -3,6 +3,7 @@
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskRunLog;
+use App\Models\TaskRunPhaseSession;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Inertia\Testing\AssertableInertia as Assert;
@@ -50,12 +51,30 @@ test('task details return run logs in latest-first order', function () {
         'updated_at' => now()->addSecond(),
     ])->save();
 
+    TaskRunPhaseSession::create([
+        'task_run_id' => $run->id,
+        'phase' => TaskRunPhaseSession::PHASE_PLAN,
+        'status' => TaskRunPhaseSession::STATUS_COMPLETED,
+        'session_id' => 'thread-plan',
+        'resume_command' => 'codex exec resume thread-plan --json',
+        'attempt_count' => 1,
+    ]);
+    TaskRunPhaseSession::create([
+        'task_run_id' => $run->id,
+        'phase' => TaskRunPhaseSession::PHASE_TEST,
+        'status' => TaskRunPhaseSession::STATUS_COMPLETED,
+        'attempt_count' => 1,
+    ]);
+
     $this->get(route('tasks.index', ['task' => $task->id]))
         ->assertOk()
         ->assertInertia(fn (Assert $page) => $page
             ->component('tasks/Index')
             ->where('selectedTask.id', $task->id)
             ->has('selectedTask.task_runs', 1)
+            ->has('selectedTask.task_runs.0.phase_sessions', 2)
+            ->where('selectedTask.task_runs.0.phase_sessions.0.session_id', 'thread-plan')
+            ->where('selectedTask.task_runs.0.phase_sessions.1.session_id', null)
             ->has('selectedTask.task_runs.0.logs', 2)
             ->where('selectedTask.task_runs.0.logs.0.id', $newerLog->id)
             ->where('selectedTask.task_runs.0.logs.0.message', 'Newer log entry')

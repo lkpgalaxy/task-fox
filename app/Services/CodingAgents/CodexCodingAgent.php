@@ -3,6 +3,7 @@
 namespace App\Services\CodingAgents;
 
 use App\Contracts\CodingAgent;
+use App\DataTransferObjects\CodingAgentInvocation;
 use App\DataTransferObjects\CodingAgentResult;
 use App\Models\InputSource;
 use App\Models\Task;
@@ -21,120 +22,67 @@ class CodexCodingAgent implements CodingAgent
     public function __construct(
         private readonly array $context = [],
         private ?SystemSettingsResolver $settingsResolver = null,
+        private ?CodexJsonEventParser $jsonEventParser = null,
     ) {}
 
     public function run(Task $task, TaskRun $run): CodingAgentResult
     {
-        $prompt = $this->buildTaskPrompt($task, $run);
-
-        $command = $this->buildCommand(
-            $task,
-            $run,
-            $prompt,
-            $this->resolveRunSetting($run, 'implement_model'),
-            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
-        );
-        $repositoryPath = $this->resolveWorkspacePath($run);
-
-        $process = new Process($command, $repositoryPath);
-        $process->setTimeout(null);
-        $process->setEnv(array_merge(
-            $this->context,
-            [
-                'TASK_ID' => (string) $task->id,
-                'TASK_RUN_ID' => (string) $run->id,
-                'TASK_WORKSPACE_PATH' => $repositoryPath,
-            ],
-        ));
-        $this->runInterruptibleProcess($process, $run);
-
-        $output = trim((string) $process->getOutput());
-        $errorOutput = trim((string) $process->getErrorOutput());
-
-        if ($this->stopRequested($run)) {
-            return $this->stopResult($run, $command);
-        }
-
-        if (! $process->isSuccessful()) {
-            $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
-
-            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
-        }
-
-        $messages = array_values(
-            array_filter([
-                'Coding agent command completed.',
-                $output !== '' ? "Output: {$output}" : null,
-                $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
-            ], static fn (?string $message) => $message !== null),
-        );
-
-        return new CodingAgentResult(
-            successful: true,
-            messages: $messages,
-            context: $this->commandLogContext($command),
+        return $this->executeJsonCommand(
+            command: $this->buildCommand(
+                $task,
+                $run,
+                $this->buildTaskPrompt($task, $run),
+                $this->resolveRunSetting($run, 'implement_model'),
+                $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'Coding agent command completed.',
+            failureMessage: 'Coding agent command failed.',
+            model: $this->resolveRunSetting($run, 'implement_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
     public function plan(Task $task, TaskRun $run): CodingAgentResult
     {
-        $prompt = $this->buildPlanningPrompt($task, $run);
-        $repositoryPath = $this->resolveWorkspacePath($run);
-
-        $command = $this->buildPlanningCommand(
-            $run,
-            $prompt,
-            $this->resolveRunSetting($run, 'plan_model'),
-            $this->resolveRunSetting($run, 'plan_reasoning_effort'),
+        $result = $this->executeJsonCommand(
+            command: $this->buildPlanningCommand(
+                $run,
+                $this->buildPlanningPrompt($task, $run),
+                $this->resolveRunSetting($run, 'plan_model'),
+                $this->resolveRunSetting($run, 'plan_reasoning_effort'),
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'Coding agent planning command completed.',
+            failureMessage: 'Coding agent planning command failed.',
+            model: $this->resolveRunSetting($run, 'plan_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'plan_reasoning_effort'),
+            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId),
         );
 
-        $process = new Process($command, $repositoryPath);
-        $process->setTimeout(null);
-        $process->setEnv(array_merge(
-            $this->context,
-            [
-                'TASK_ID' => (string) $task->id,
-                'TASK_RUN_ID' => (string) $run->id,
-                'TASK_WORKSPACE_PATH' => $repositoryPath,
-            ],
-        ));
-        $this->runInterruptibleProcess($process, $run);
-
-        $output = trim((string) $process->getOutput());
-        $errorOutput = trim((string) $process->getErrorOutput());
-
-        if ($this->stopRequested($run)) {
-            return $this->stopResult($run, $command);
+        if (! $result->successful) {
+            return $result;
         }
 
-        if (! $process->isSuccessful()) {
-            $message = $errorOutput !== '' ? $errorOutput : 'Coding agent planning command failed.';
-
-            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
-        }
-
-        $plan = $this->extractProposedPlan($output);
+        $plan = $this->extractProposedPlan($this->primaryAgentOutput($result));
 
         if ($plan === '') {
             return new CodingAgentResult(
                 successful: false,
-                messages: $output !== '' ? ["Output: {$output}"] : [],
+                messages: $result->messages,
                 error: 'Coding agent did not return an implementation plan.',
-                context: $this->commandLogContext($command),
+                invocation: $result->invocation,
             );
         }
 
         return new CodingAgentResult(
             successful: true,
-            messages: array_values(
-                array_filter([
-                    'Coding agent planning command completed.',
-                    $output !== '' ? "Output: {$output}" : null,
-                    $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
-                ], static fn (?string $message) => $message !== null),
-            ),
+            messages: $result->messages,
             payload: ['plan' => $plan],
-            context: $this->commandLogContext($command),
+            invocation: $result->invocation,
         );
     }
 
@@ -151,81 +99,61 @@ class CodexCodingAgent implements CodingAgent
         }
 
         try {
-            $command = $this->buildReviewCommand(
-                $task,
-                $run,
-                $outputPath,
-                $this->resolveRunSetting($run, 'review_model'),
-                $this->resolveRunSetting($run, 'review_reasoning_effort'),
+            $result = $this->executeJsonCommand(
+                command: $this->buildReviewCommand(
+                    $task,
+                    $run,
+                    $this->buildReviewPrompt($task, $run, $attempt),
+                    $outputPath,
+                    $this->resolveRunSetting($run, 'review_model'),
+                    $this->resolveRunSetting($run, 'review_reasoning_effort'),
+                ),
+                repositoryPath: $repositoryPath,
+                run: $run,
+                successMessage: 'Coding agent review command completed.',
+                failureMessage: 'Coding agent review command failed.',
+                model: $this->resolveRunSetting($run, 'review_model'),
+                reasoningEffort: $this->resolveRunSetting($run, 'review_reasoning_effort'),
+                resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId),
             );
-
-            $process = new Process(
-                $command,
-                $repositoryPath,
-            );
-            $process->setTimeout(null);
-            $process->setEnv(array_merge(
-                $this->context,
-                [
-                    'TASK_ID' => (string) $task->id,
-                    'TASK_RUN_ID' => (string) $run->id,
-                    'TASK_WORKSPACE_PATH' => $repositoryPath,
-                ],
-            ));
-            $this->runInterruptibleProcess($process, $run);
-
-            $stdout = trim((string) $process->getOutput());
-            $stderr = trim((string) $process->getErrorOutput());
             $rawOutput = trim((string) @file_get_contents($outputPath));
+            $reviewText = $rawOutput !== '' ? $rawOutput : $this->primaryAgentOutput($result);
 
-            $messages = array_values(
-                array_filter([
-                    'Coding agent review command completed.',
-                    $rawOutput !== '' ? "Output: {$rawOutput}" : null,
-                    $stdout !== '' ? "STDOUT: {$stdout}" : null,
-                    $stderr !== '' ? "STDERR: {$stderr}" : null,
-                ], static fn (?string $message): bool => $message !== null),
-            );
-
-            if ($this->stopRequested($run)) {
-                return $this->stopResult($run, $command);
+            if (! $result->successful) {
+                return $result;
             }
 
-            if ($rawOutput === '') {
+            if ($reviewText === '') {
                 return new CodingAgentResult(
                     successful: false,
-                    messages: $messages,
+                    messages: $result->messages,
                     error: 'Coding agent review returned no output.',
                     payload: [
-                        'review_text' => $rawOutput,
-                        'stdout' => $stdout,
-                        'stderr' => $stderr,
+                        'review_text' => $reviewText,
                     ],
-                    context: $this->commandLogContext($command),
+                    invocation: $result->invocation,
                 );
             }
 
             $payload = [
-                'review_text' => $rawOutput,
-                'stdout' => $stdout,
-                'stderr' => $stderr,
+                'review_text' => $reviewText,
             ];
 
-            if (! $this->reviewTextHasFindings($run, $rawOutput)) {
+            if (! $this->reviewTextHasFindings($run, $reviewText)) {
                 return new CodingAgentResult(
                     successful: true,
-                    messages: $messages,
+                    messages: $result->messages,
                     payload: $payload,
-                    context: $this->commandLogContext($command),
+                    invocation: $result->invocation,
                 );
             }
 
             return new CodingAgentResult(
                 successful: false,
-                messages: $messages,
-                error: $rawOutput,
+                messages: $result->messages,
+                error: $reviewText,
                 payload: $payload,
-                context: $this->commandLogContext($command),
+                invocation: $result->invocation,
             );
         } finally {
             if (is_file($outputPath)) {
@@ -234,27 +162,74 @@ class CodexCodingAgent implements CodingAgent
         }
     }
 
+    public function resumeImplementation(Task $task, TaskRun $run, string $feedback, int $attempt): CodingAgentResult
+    {
+        $sessionId = $run->phaseSessions()
+            ->where('phase', 'implement')
+            ->value('session_id');
+
+        if (! is_string($sessionId) || trim($sessionId) === '') {
+            return new CodingAgentResult(
+                successful: false,
+                error: 'No persisted implementation session is available to resume.',
+            );
+        }
+
+        return $this->executeJsonCommand(
+            command: $this->buildResumeCommand(
+                $sessionId,
+                $this->buildImplementationRetryPrompt($task, $run, $feedback, $attempt),
+                $this->resolveRunSetting($run, 'implement_model'),
+                $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+                true,
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'Coding agent implementation resume completed.',
+            failureMessage: 'Coding agent implementation resume failed.',
+            model: $this->resolveRunSetting($run, 'implement_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            resumeCommandFactory: fn (string $persistedSessionId): string => $this->buildResumeCommandString($persistedSessionId, true),
+        );
+    }
+
     public function captureScreenshot(Task $task, TaskRun $run): CodingAgentResult
     {
-        return $this->executeTaskCommand(
-            $task,
-            $run,
-            $this->buildScreenshotPrompt($task, $run),
-            'Screenshot verification command completed.',
-            $this->resolveRunSetting($run, 'implement_model'),
-            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+        return $this->executeJsonCommand(
+            command: $this->buildCommand(
+                $task,
+                $run,
+                $this->buildScreenshotPrompt($task, $run),
+                $this->resolveRunSetting($run, 'implement_model'),
+                $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'Screenshot verification command completed.',
+            failureMessage: 'Screenshot verification command failed.',
+            model: $this->resolveRunSetting($run, 'implement_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
     public function smokeTestUrl(Task $task, TaskRun $run): CodingAgentResult
     {
-        return $this->executeTaskCommand(
-            $task,
-            $run,
-            $this->buildUrlSmokeTestPrompt($task),
-            'URL smoke test command completed.',
-            $this->resolveRunSetting($run, 'implement_model'),
-            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+        return $this->executeJsonCommand(
+            command: $this->buildCommand(
+                $task,
+                $run,
+                $this->buildUrlSmokeTestPrompt($task),
+                $this->resolveRunSetting($run, 'implement_model'),
+                $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'URL smoke test command completed.',
+            failureMessage: 'URL smoke test command failed.',
+            model: $this->resolveRunSetting($run, 'implement_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
     }
 
@@ -319,25 +294,31 @@ PROMPT;
 
     public function fixReviewFindings(Task $task, TaskRun $run, string $reviewFeedback, int $attempt): CodingAgentResult
     {
-        return $this->executeTaskCommand(
+        return $this->resumeImplementation(
             $task,
             $run,
             $this->buildFixReviewPrompt($task, $run, $reviewFeedback, $attempt),
-            'Coding agent review fix command completed.',
-            $this->resolveRunSetting($run, 'implement_model'),
-            $this->resolveRunSetting($run, 'implement_reasoning_effort'),
+            $attempt,
         );
     }
 
     public function generateCommitMessage(Task $task, TaskRun $run): CodingAgentResult
     {
-        $result = $this->executeTaskCommand(
-            $task,
-            $run,
-            $this->buildCommitMessagePrompt($task),
-            'Coding agent commit message command completed.',
-            $this->resolveRunSetting($run, 'commit_message_model'),
-            $this->resolveRunSetting($run, 'commit_message_reasoning_effort'),
+        $result = $this->executeJsonCommand(
+            command: $this->buildCommand(
+                $task,
+                $run,
+                $this->buildCommitMessagePrompt($task),
+                $this->resolveRunSetting($run, 'commit_message_model'),
+                $this->resolveRunSetting($run, 'commit_message_reasoning_effort'),
+            ),
+            repositoryPath: $this->resolveWorkspacePath($run),
+            run: $run,
+            successMessage: 'Coding agent commit message command completed.',
+            failureMessage: 'Coding agent commit message command failed.',
+            model: $this->resolveRunSetting($run, 'commit_message_model'),
+            reasoningEffort: $this->resolveRunSetting($run, 'commit_message_reasoning_effort'),
+            resumeCommandFactory: fn (string $sessionId): string => $this->buildResumeCommandString($sessionId, true),
         );
 
         if (! $result->successful) {
@@ -358,6 +339,7 @@ PROMPT;
             successful: true,
             messages: $result->messages,
             payload: ['message' => $subject],
+            invocation: $result->invocation,
         );
     }
 
@@ -504,6 +486,52 @@ Instructions:
 PROMPT;
     }
 
+    private function buildImplementationRetryPrompt(Task $task, TaskRun $run, string $feedback, int $attempt): string
+    {
+        $feedback = $this->limitPromptText($feedback, 12000);
+
+        return <<<PROMPT
+Continue implementation for task {$task->id}: {$task->title}
+
+Retry attempt: {$attempt}
+
+Feedback to address:
+{$feedback}
+
+Instructions:
+- Resume the existing implementation session instead of restarting from scratch.
+- Make the smallest correct fix that addresses the feedback.
+- Preserve unrelated work.
+- Do not commit, push, or create a pull request.
+- Run only the verification needed to confirm the fix before responding.
+PROMPT;
+    }
+
+    private function buildReviewPrompt(Task $task, TaskRun $run, int $attempt): string
+    {
+        $baseBranch = $run->base_branch ?: 'main';
+
+        return <<<PROMPT
+Review the current code changes for task {$task->id}: {$task->title}
+
+Task description:
+{$task->description}
+
+Base branch:
+{$baseBranch}
+
+Review attempt:
+{$attempt}
+
+Instructions:
+- Review the current diff against the base branch and any related changed tests.
+- Do not edit files.
+- Focus on bugs, regressions, missing tests, and correctness issues.
+- If the patch is ready with no actionable findings, reply with a short pass statement.
+- Otherwise return concise actionable findings with enough detail to fix them.
+PROMPT;
+    }
+
     private function limitPromptText(string $text, int $limit): string
     {
         $text = trim($text);
@@ -584,7 +612,12 @@ PROMPT;
         if (! $process->isSuccessful()) {
             $message = $errorOutput !== '' ? $errorOutput : 'Coding agent analysis command failed.';
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
+            return new CodingAgentResult(
+                successful: false,
+                messages: [],
+                error: $message,
+                invocation: new CodingAgentInvocation(command: $command),
+            );
         }
 
         try {
@@ -594,7 +627,7 @@ PROMPT;
                 successful: false,
                 messages: $output !== '' ? ["Output: {$output}"] : [],
                 error: 'Coding agent returned invalid task JSON: '.$exception->getMessage(),
-                context: $this->commandLogContext($command),
+                invocation: new CodingAgentInvocation(command: $command),
             );
         }
 
@@ -607,7 +640,7 @@ PROMPT;
                 ], static fn (?string $message) => $message !== null),
             ),
             payload: $payload,
-            context: $this->commandLogContext($command),
+            invocation: new CodingAgentInvocation(command: $command),
         );
     }
 
@@ -673,6 +706,7 @@ PAYLOAD;
         return [
             $this->codexExecutable(),
             'exec',
+            '--json',
             ...$this->modelArguments($model),
             ...$this->reasoningEffortArguments($reasoningEffort),
             '--dangerously-bypass-approvals-and-sandbox',
@@ -689,28 +723,37 @@ PAYLOAD;
         return [
             $this->codexExecutable(),
             'exec',
+            '--json',
             ...$this->modelArguments($model),
             ...$this->reasoningEffortArguments($reasoningEffort),
             '--sandbox',
             'read-only',
-            '--ephemeral',
             '-C',
             $repositoryPath,
             $prompt,
         ];
     }
 
-    private function executeTaskCommand(Task $task, TaskRun $run, string $prompt, string $successMessage, ?string $model = null, ?string $reasoningEffort = null): CodingAgentResult
-    {
-        $command = $this->buildCommand($task, $run, $prompt, $model, $reasoningEffort);
-        $repositoryPath = $this->resolveWorkspacePath($run);
-
+    /**
+     * @param  list<string>  $command
+     * @param  callable(string): string|null  $resumeCommandFactory
+     */
+    private function executeJsonCommand(
+        array $command,
+        string $repositoryPath,
+        TaskRun $run,
+        string $successMessage,
+        string $failureMessage,
+        ?string $model = null,
+        ?string $reasoningEffort = null,
+        ?callable $resumeCommandFactory = null,
+    ): CodingAgentResult {
         $process = new Process($command, $repositoryPath);
         $process->setTimeout(null);
         $process->setEnv(array_merge(
             $this->context,
             [
-                'TASK_ID' => (string) $task->id,
+                'TASK_ID' => (string) $run->task_id,
                 'TASK_RUN_ID' => (string) $run->id,
                 'TASK_WORKSPACE_PATH' => $repositoryPath,
             ],
@@ -724,34 +767,35 @@ PAYLOAD;
             return $this->stopResult($run, $command);
         }
 
-        if (! $process->isSuccessful()) {
-            $message = $errorOutput !== '' ? $errorOutput : 'Coding agent command failed.';
+        $summary = $this->jsonEventParser()->parse($output);
+        $agentOutput = $summary->messages !== [] ? implode("\n\n", $summary->messages) : $output;
+        $invocation = new CodingAgentInvocation(
+            command: $command,
+            sessionId: $summary->sessionId,
+            resumeCommand: $summary->sessionId !== null && $resumeCommandFactory !== null
+                ? $resumeCommandFactory($summary->sessionId)
+                : null,
+            model: $summary->model ?? $model,
+            reasoningEffort: $reasoningEffort,
+            usage: $summary->usage(),
+        );
 
-            return new CodingAgentResult(successful: false, messages: [], error: $message, context: $this->commandLogContext($command));
+        if (! $process->isSuccessful()) {
+            $message = $errorOutput !== '' ? $errorOutput : ($agentOutput !== '' ? $agentOutput : $failureMessage);
+
+            return new CodingAgentResult(
+                successful: false,
+                messages: $this->commandMessages($successMessage, $agentOutput, $errorOutput),
+                error: $message,
+                invocation: $invocation,
+            );
         }
 
         return new CodingAgentResult(
             successful: true,
-            messages: array_values(
-                array_filter([
-                    $successMessage,
-                    $output !== '' ? "Output: {$output}" : null,
-                    $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
-                ], static fn (?string $message) => $message !== null),
-            ),
-            context: $this->commandLogContext($command),
+            messages: $this->commandMessages($successMessage, $agentOutput, $errorOutput),
+            invocation: $invocation,
         );
-    }
-
-    /**
-     * @param  list<string>  $command
-     * @return array{command: list<string>}
-     */
-    private function commandLogContext(array $command): array
-    {
-        return [
-            'command' => $command,
-        ];
     }
 
     private function runInterruptibleProcess(Process $process, TaskRun $run): void
@@ -789,7 +833,7 @@ PAYLOAD;
         return new CodingAgentResult(
             successful: false,
             error: $message,
-            context: $this->commandLogContext($command),
+            invocation: new CodingAgentInvocation(command: $command),
         );
     }
 
@@ -853,25 +897,59 @@ PAYLOAD;
         ];
     }
 
-    private function buildReviewCommand(Task $task, TaskRun $run, string $outputPath, ?string $model = null, ?string $reasoningEffort = null): array
+    private function buildReviewCommand(Task $task, TaskRun $run, string $prompt, string $outputPath, ?string $model = null, ?string $reasoningEffort = null): array
     {
         $repositoryPath = $this->resolveWorkspacePath($run);
 
         return [
             $this->codexExecutable(),
             'exec',
+            '--json',
             ...$this->modelArguments($model),
             ...$this->reasoningEffortArguments($reasoningEffort),
+            '--sandbox',
+            'read-only',
             '-C',
             $repositoryPath,
-            'review',
-            '--base',
-            $run->base_branch ?: 'main',
-            '--title',
-            "Task {$task->id}: {$task->title}",
             '--output-last-message',
             $outputPath,
+            $prompt,
         ];
+    }
+
+    /**
+     * @param  list<string>  $command
+     * @return list<string>
+     */
+    private function buildResumeCommand(
+        string $sessionId,
+        string $prompt,
+        ?string $model = null,
+        ?string $reasoningEffort = null,
+        bool $bypassApprovals = false,
+    ): array {
+        return [
+            $this->codexExecutable(),
+            'exec',
+            'resume',
+            $sessionId,
+            '--json',
+            ...$this->modelArguments($model),
+            ...$this->reasoningEffortArguments($reasoningEffort),
+            ...($bypassApprovals ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+            $prompt,
+        ];
+    }
+
+    private function buildResumeCommandString(string $sessionId, bool $bypassApprovals = false): string
+    {
+        $command = ['codex', 'exec', 'resume', $sessionId, '--json'];
+
+        if ($bypassApprovals) {
+            $command[] = '--dangerously-bypass-approvals-and-sandbox';
+        }
+
+        return implode(' ', $command);
     }
 
     private function codexExecutable(): string
@@ -977,5 +1055,33 @@ PAYLOAD;
         }
 
         return ['-c', 'model_reasoning_effort="'.$reasoningEffort.'"'];
+    }
+
+    private function jsonEventParser(): CodexJsonEventParser
+    {
+        return $this->jsonEventParser ??= app(CodexJsonEventParser::class);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function commandMessages(string $successMessage, string $agentOutput, string $errorOutput): array
+    {
+        return array_values(array_filter([
+            $successMessage,
+            $agentOutput !== '' ? "Output: {$agentOutput}" : null,
+            $errorOutput !== '' ? "STDERR: {$errorOutput}" : null,
+        ], static fn (?string $message): bool => $message !== null));
+    }
+
+    private function primaryAgentOutput(CodingAgentResult $result): string
+    {
+        foreach ($result->messages as $message) {
+            if (str_starts_with($message, 'Output: ')) {
+                return trim(substr($message, 8));
+            }
+        }
+
+        return '';
     }
 }

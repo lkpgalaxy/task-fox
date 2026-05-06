@@ -68,6 +68,27 @@ type WorkflowState = {
     checkpoints?: WorkflowCheckpoint[];
 };
 
+type PhaseSessionRecord = {
+    phase: 'plan' | 'implement' | 'test' | 'review';
+    status: string;
+    session_id: string | null;
+    resume_command: string | null;
+    model: string | null;
+    reasoning_effort: string | null;
+    attempt_count: number;
+    usage: {
+        input_tokens: number;
+        cached_input_tokens: number;
+        output_tokens: number;
+        total_tokens: number;
+    };
+    total_cost_usd: number | null;
+    last_error: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    updated_at: string | null;
+};
+
 type TaskRunRecord = {
     id: number;
     status: string;
@@ -93,6 +114,7 @@ type TaskRunRecord = {
     last_error: string | null;
     started_at: string | null;
     finished_at: string | null;
+    phase_sessions: PhaseSessionRecord[];
     logs: RunLog[];
 };
 
@@ -199,6 +221,9 @@ const taskStatusLabel = (status: string) => status.replaceAll('_', ' ');
 
 const taskPriorityLabel = (priority: string) => priority.toUpperCase();
 
+const phaseLabel = (phase: PhaseSessionRecord['phase']) =>
+    phase.charAt(0).toUpperCase() + phase.slice(1);
+
 const projectRequiredMessage = 'Assign a project before approving this task.';
 
 const stoppableTaskRunStatuses = [
@@ -253,6 +278,9 @@ const formatError = (error: string | string[] | undefined): string | null => {
 
 const setStatus = (value: boolean | undefined): string =>
     value ? 'set' : 'not set';
+
+const formatUsd = (amount: number | null): string =>
+    amount === null ? 'Unpriced' : `$${amount.toFixed(6)}`;
 
 const defaultReviewerForProject = (
     projects: ProjectSummary[],
@@ -1212,6 +1240,102 @@ function TaskDetails({
                                                     'Codex default'}
                                             </DetailItem>
                                         </div>
+                                    </div>
+                                    <div className="mt-3">
+                                        <p className="text-xs font-medium text-ink-muted">
+                                            Phase sessions
+                                        </p>
+                                        {run.phase_sessions.length ? (
+                                            <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                                                {run.phase_sessions.map(
+                                                    (phaseSession) => (
+                                                        <div
+                                                            key={
+                                                                phaseSession.phase
+                                                            }
+                                                            className="rounded-md border border-hairline bg-surface-1 p-3"
+                                                        >
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <span className="text-xs font-semibold text-ink">
+                                                                    {phaseLabel(
+                                                                        phaseSession.phase,
+                                                                    )}
+                                                                </span>
+                                                                <Badge
+                                                                    value={
+                                                                        phaseSession.status
+                                                                    }
+                                                                >
+                                                                    {taskStatusLabel(
+                                                                        phaseSession.status,
+                                                                    )}
+                                                                </Badge>
+                                                            </div>
+                                                            <div className="mt-2 grid gap-1 text-xs text-ink-subtle">
+                                                                <span>
+                                                                    Attempts:{' '}
+                                                                    {
+                                                                        phaseSession.attempt_count
+                                                                    }
+                                                                </span>
+                                                                <span>
+                                                                    Model:{' '}
+                                                                    {phaseSession.model ??
+                                                                        'Codex default'}
+                                                                </span>
+                                                                <span>
+                                                                    Tokens:{' '}
+                                                                    {
+                                                                        phaseSession
+                                                                            .usage
+                                                                            .total_tokens
+                                                                    }
+                                                                </span>
+                                                                <span>
+                                                                    Cost:{' '}
+                                                                    {formatUsd(
+                                                                        phaseSession.total_cost_usd,
+                                                                    )}
+                                                                </span>
+                                                                <span>
+                                                                    Updated:{' '}
+                                                                    {formatDisplayDateTime(
+                                                                        phaseSession.updated_at,
+                                                                    )}
+                                                                </span>
+                                                            </div>
+                                                            {phaseSession.session_id ? (
+                                                                <p className="mt-2 font-mono text-[11px] break-all text-ink-muted">
+                                                                    Session:{' '}
+                                                                    {
+                                                                        phaseSession.session_id
+                                                                    }
+                                                                </p>
+                                                            ) : null}
+                                                            {phaseSession.resume_command ? (
+                                                                <p className="mt-2 font-mono text-[11px] break-all text-ink-tertiary">
+                                                                    {
+                                                                        phaseSession.resume_command
+                                                                    }
+                                                                </p>
+                                                            ) : null}
+                                                            {phaseSession.last_error ? (
+                                                                <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 p-2 text-[11px] leading-5 text-red-100">
+                                                                    {
+                                                                        phaseSession.last_error
+                                                                    }
+                                                                </p>
+                                                            ) : null}
+                                                        </div>
+                                                    ),
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <p className="mt-2 text-xs text-ink-subtle">
+                                                No phase sessions recorded for
+                                                this run.
+                                            </p>
+                                        )}
                                     </div>
                                     <div className="mt-3 rounded-md border border-hairline bg-surface-1 p-3">
                                         <p className="text-xs font-medium text-ink-muted">

@@ -12,6 +12,8 @@ interface CodingAgent extends Agent
 
     public function run(Task $task, TaskRun $run): CodingAgentResult;
 
+    public function resumeImplementation(Task $task, TaskRun $run, string $feedback, int $attempt): CodingAgentResult;
+
     public function smokeTestUrl(Task $task, TaskRun $run): CodingAgentResult;
 
     public function captureScreenshot(Task $task, TaskRun $run): CodingAgentResult;
