@@ -861,7 +861,11 @@ function TaskDetails({
     const taskRuns = [...(task.task_runs ?? [])].sort((first, second) => {
         return second.id - first.id;
     });
-    const latestRun = taskRuns[0] ?? null;
+    const taskRunsWithDisplayNumber = taskRuns.map((run, index) => ({
+        ...run,
+        displayRunNumber: taskRuns.length - index,
+    }));
+    const latestRun = taskRunsWithDisplayNumber[0] ?? null;
     const latestWorkflow = latestRun?.workflow_state ?? null;
     const latestRunStopRequested = Boolean(latestWorkflow?.stop_requested_at);
     const latestRunCanBeStopped =
@@ -1086,7 +1090,7 @@ function TaskDetails({
                     </h3>
                     {latestRun ? (
                         <Badge value={latestRun.status}>
-                            Run #{latestRun.id}{' '}
+                            Run #{latestRun.displayRunNumber}{' '}
                             {taskStatusLabel(latestRun.status)}
                         </Badge>
                     ) : null}
@@ -1140,7 +1144,7 @@ function TaskDetails({
                 </div>
                 {taskRuns.length ? (
                     <div className="space-y-3">
-                        {taskRuns.map((run, index) => (
+                        {taskRunsWithDisplayNumber.map((run, index) => (
                             <details
                                 key={run.id}
                                 className="group rounded-md border border-hairline bg-surface-2"
@@ -1151,7 +1155,7 @@ function TaskDetails({
                                             &gt;
                                         </span>
                                         <span className="text-sm font-medium text-ink">
-                                            Run #{run.id}
+                                            Run #{run.displayRunNumber}
                                         </span>
                                         {index === 0 ? (
                                             <Badge>Latest</Badge>
